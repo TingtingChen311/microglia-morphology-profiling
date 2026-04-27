@@ -1,0 +1,50 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite both the paper and the archived release."
+title: "microglia-morphology-profiling: code release v1.0.0"
+type: software
+version: 1.0.0
+date-released: 2026-04-27
+license: MIT
+repository-code: "https://github.com/TingtingChen311/microglia-morphology-profiling"
+url: "https://github.com/TingtingChen311/microglia-morphology-profiling"
+abstract: >-
+  Code and analysis pipeline for label-free, time-resolved morphological
+  profiling of human iPSC-derived microglia, combining live-cell phase-contrast
+  imaging, Cellpose-SAM segmentation, CellProfiler feature extraction, and R
+  downstream analyses.
+authors:
+  - family-names: Chen
+    given-names: Tingting
+    email: t.chen@rug.nl
+    affiliation: "University of Groningen"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"   # TODO: fill in
+  - family-names: Li
+    given-names: Xiaopeng
+    affiliation: "University of Groningen"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"   # TODO: fill in
+  - family-names: Dolga
+    given-names: Amalia M.
+    email: a.m.dolga@rug.nl
+    affiliation: "University of Groningen"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"   # TODO: fill in
+keywords:
+  - microglia
+  - iPSC
+  - morphology
+  - Cellpose-SAM
+  - CellProfiler
+  - single-cell
+  - label-free imaging
+preferred-citation:
+  type: article
+  title: "Single-cell, label-free morphology profiling of iPSCs-derived microglia reveals dynamic state transitions"
+  authors:
+    - family-names: Chen
+      given-names: Tingting
+    - family-names: Li
+      given-names: Xiaopeng
+    - family-names: Dolga
+      given-names: Amalia M.
+  year: 2025
+  journal: "Journal Name"
+  doi: "10.xxxx/xxxxx"   # TODO: replace upon paper acceptance
