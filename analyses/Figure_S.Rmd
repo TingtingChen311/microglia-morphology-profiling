@@ -129,7 +129,7 @@ ggsave(paste0(FIG_PREFIX, "_Fig3context.pdf"), p_f3 & transparent_theme,
 ```
 
 ```{r plot-fig5-context, fig.width=12, fig.height=7}
-# Figure 5 context: 6 cytokines
+# Figure 5 context: 6 conditions
 df_f5 <- frac_summary %>% filter(Stimulus %in% TREATMENTS_6)
 
 p_f5 <- ggplot(df_f5, aes(Time_hr, mean_f, color = Stimulus, fill = Stimulus)) +
@@ -168,3 +168,104 @@ ggsave(paste0(FIG_PREFIX, "_Fig5context.png"), p_f5 & transparent_theme,
 ggsave(paste0(FIG_PREFIX, "_Fig5context.pdf"), p_f5 & transparent_theme,
        width = 12, height = 7, bg = "transparent")
 ```
+
+```{r}
+```{r plot-figS3-silhouette-diagnostics, fig.width=8, fig.height=3.8}
+# Figure S3: k-sensitivity diagnostics for morphological anchor states
+# This uses the diagnostic RDS saved by R/define_state_anchors.R
+
+SILHOUETTE_FILE <- here::here("output", "FigureS3_silhouette.rds")
+
+if (!file.exists(SILHOUETTE_FILE)) {
+  stop("Silhouette diagnostic file not found: ", SILHOUETTE_FILE,
+       "\nRun source(here::here('R', 'define_state_anchors.R')) first.")
+}
+
+sil_bundle <- readRDS(SILHOUETTE_FILE)
+
+silhouette_df <- sil_bundle$silhouette
+diagnostic_df <- sil_bundle$diagnostic
+
+if (!exists("transparent_theme")) {
+  transparent_theme <- theme(
+    plot.background   = element_rect(fill = "transparent", colour = NA),
+    panel.background  = element_rect(fill = "transparent", colour = NA),
+    legend.background = element_rect(fill = "transparent", colour = NA)
+  )
+}
+
+# Panel A: mean silhouette width for k = 2..8
+p_sil <- ggplot(silhouette_df, aes(x = k, y = silhouette)) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 2) +
+  geom_point(
+    data = silhouette_df %>% filter(k == 4),
+    size = 3
+  ) +
+  scale_x_continuous(breaks = 2:8) +
+  theme_classic(base_size = 10) +
+  labs(
+    title = "A",
+    x = "Number of clusters (k)",
+    y = "Mean silhouette width"
+  )
+
+# Panel B: how k = 2 and k = 3 merge the final k = 4 states
+diagnostic_long <- diagnostic_df %>%
+  pivot_longer(
+    cols = c(k2_cluster, k3_cluster),
+    names_to = "solution",
+    values_to = "cluster"
+  ) %>%
+  mutate(
+    solution = recode(
+      solution,
+      k2_cluster = "k = 2",
+      k3_cluster = "k = 3"
+    ),
+    State_final = factor(State_final, levels = STATE_LEVELS)
+  ) %>%
+  count(solution, cluster, State_final) %>%
+  group_by(solution, cluster) %>%
+  mutate(fraction = n / sum(n)) %>%
+  ungroup()
+
+p_merge <- ggplot(diagnostic_long, aes(x = cluster, y = fraction, fill = State_final)) +
+  geom_col(width = 0.8) +
+  facet_wrap(~ solution, scales = "free_x") +
+  scale_fill_manual(values = STATE_COLORS, drop = FALSE) +
+  theme_classic(base_size = 10) +
+  theme(
+    legend.position = "right",
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.background = element_rect(fill = "grey95", color = NA)
+  ) +
+  labs(
+    title = "B",
+    x = "Lower-k cluster",
+    y = "Fraction of cells",
+    fill = "Final k = 4 state"
+  )
+
+p_s3 <- p_sil + p_merge + plot_layout(widths = c(1, 1.6))
+
+p_s3
+
+ggsave(here::here("output", "FigureS3_silhouette_diagnostics.png"),
+       p_s3 & transparent_theme,
+       width = 8, height = 3.8, dpi = 600, bg = "transparent")
+
+ggsave(here::here("output", "FigureS3_silhouette_diagnostics.pdf"),
+       p_s3 & transparent_theme,
+       width = 8, height = 3.8, bg = "transparent")
+
+write.csv(silhouette_df,
+          here::here("output", "FigureS3_silhouette_scores.csv"),
+          row.names = FALSE)
+
+write.csv(diagnostic_long,
+          here::here("output", "FigureS3_lower_k_diagnostics.csv"),
+          row.names = FALSE)
+```
+
+
