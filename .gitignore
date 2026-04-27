@@ -1,4 +1,20 @@
-# ============================================================
+# --- Data ---------------------------------------------------------------
+# Raw images, masks, and large per-cell measurement CSVs are archived on
+# Zenodo (not on GitHub; see data/README.md). Plate metadata is small and
+# is kept in the repo so that experiment design is visible without
+# downloading the full Zenodo dataset.
+data/*.csv
+data/*.tif
+data/*.tiff
+data/raw_images/
+data/ros_images/
+data/filtered_images/
+data/masks/
+data/cellprofiler_output/
+
+# Keep the data README and the (small) plate metadata files
+!data/README.md
+!data/*_Metadata.csv# ============================================================
 # .gitignore for microglia-morphology-profiling
 # ============================================================
 
@@ -97,3 +113,6 @@ tmp/
 scratch/
 *.tmp
 *.bak
+
+# (Whitelist plate metadata: small CSVs that document experiment design)
+!data/*_Metadata.csv

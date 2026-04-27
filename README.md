@@ -41,7 +41,8 @@ We developed a label-free pipeline that combines (i) live-cell phase-contrast im
 │   ├── Figure6.Rmd                      # Figure 6 (CellROX / ROS analysis)
 │   └── Figure_S.Rmd                     # Supplementary figures and tables
 ├── cellprofiler/
-│   └── pipeline.cppipe                  # Feature-extraction pipeline (CellProfiler v4.2.8)
+│   ├── main_pipeline.cppipe             # Main morphology feature-extraction pipeline (CellProfiler v4.2.8)
+│   └── ros_pipeline.cppipe              # ROS feature-extraction pipeline (CellProfiler v4.2.8)
 ├── segmentation/
 │   ├── README.md                        # Segmentation step-by-step instructions
 │   ├── 1_preprocess.py                  # Image preprocessing (PIL: UnsharpMask + GaussianBlur)
@@ -51,7 +52,11 @@ We developed a label-free pipeline that combines (i) live-cell phase-contrast im
 │       ├── preprocess.sbatch            # SLURM job script for preprocessing
 │       └── segment.sbatch               # SLURM job script for segmentation (GPU)
 └── data/
-    └── README.md                        # Pointer to Zenodo / BioImage Archive
+    ├── README.md                        # Data layout and archive instructions
+    ├── Exp1_Metadata.csv                # Plate metadata for differentiation run 1
+    ├── Exp2_Metadata.csv                # Plate metadata for differentiation run 2
+    ├── Exp3_Metadata.csv                # Plate metadata for differentiation run 3
+    └── 24h_ROS_Metadata.csv             # Plate metadata for the 24 h ROS experiment
 ```
 
 ---
@@ -118,7 +123,7 @@ Raw and processed data are archived separately due to size:
 | CellProfiler per-cell measurement CSVs | Zenodo | `10.5281/zenodo.XXXXXXX` |
 | Frozen state anchors (`state_anchors.rds`) | This repo (`R/`) | — |
 
-After downloading the CellProfiler outputs, place them under `data/cellprofiler_output/` following the structure documented in `data/README.md`.
+Plate-level metadata CSV files are included in this repository under `data/`. Large raw images, segmentation masks, and CellProfiler per-cell measurement CSVs are archived externally. After downloading the CellProfiler outputs, place them under `data/cellprofiler_output/` following the structure documented in `data/README.md`.
 
 ---
 
@@ -154,9 +159,11 @@ sbatch segmentation/slurm/segment.sbatch
 
 ```bash
 cellprofiler -c -r \
-    -p cellprofiler/pipeline.cppipe \
+    -p cellprofiler/main_pipeline.cppipe \
     -i data/masks \
     -o data/cellprofiler_output
+
+For the ROS experiment, use `cellprofiler/ros_pipeline.cppipe` with the corresponding ROS image or mask input directory.
 ```
 
 ### Stage 3 — R analysis and figure generation
