@@ -1,0 +1,30 @@
+# Frozen parameters for image preprocessing and segmentation
+# Chen et al., "Single-cell, label-free morphology profiling of iPSC-derived microglia"
+#
+# These values were used to generate all results in the manuscript.
+# Do not modify these values when reproducing the published analysis.
+
+preprocessing:
+  description: "PIL-based sharpening and smoothing of raw phase-contrast TIFFs"
+  unsharp_mask:
+    radius: 10
+    percent: 100
+    threshold: 0
+  gaussian_blur:
+    radius: 0.4
+  output_mode: "L"           # 8-bit grayscale
+  output_suffix: "_filt"
+  multipage_handling: "first_frame"
+
+segmentation:
+  description: "Cellpose-SAM segmentation on preprocessed images"
+  model: "cpsam"             # pretrained, no fine-tuning
+  channels: [0, 0]           # single-channel grayscale input
+  diameter: 25               # pixels
+  flow_threshold: 1.1
+  cellprob_threshold: -3
+  normalize_percentile: [1, 99]
+  niter: 600
+  batch_size: 1
+  output_format: "tif"
+  save_npy: false

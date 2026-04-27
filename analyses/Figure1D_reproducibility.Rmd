@@ -1,0 +1,289 @@
+---
+title: "Figure1D_reproducibility"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+# ---- Project-wide knitr settings ----
+knitr::opts_knit$set(root.dir = here::here())
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE,
+  cache = FALSE
+)
+
+# ---- Output discipline ----
+# ALL file writes in this Rmd must go under FIG_PREFIX.
+# No hardcoded paths, no scratch files outside OUT_DIR.
+OUT_DIR <- here::here("output")
+FIG_PREFIX <- file.path(OUT_DIR, "Figure1D")
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+# Prevent auto Rplots.pdf when running non-interactively
+if (!interactive()) pdf(NULL)
+# ---- Transparent background theme patch ----
+# Apply before ggsave to make all backgrounds transparent
+transparent_theme <- theme(
+  plot.background       = element_rect(fill = "transparent", colour = NA),
+  panel.background      = element_rect(fill = "transparent", colour = NA),
+  legend.background     = element_rect(fill = "transparent", colour = NA),
+  legend.box.background = element_rect(fill = "transparent", colour = NA),
+  legend.key            = element_rect(fill = "transparent", colour = NA)
+)
+```
+
+
+```{r load-pipeline}
+# Only source if objects not already loaded
+# (allows skipping this chunk when interactively re-running)
+if (!exists("scores_all") || !exists("dat_image")) {
+  source(here::here("R", "load_and_preprocess.R"))
+}
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(patchwork)
+  library(ggpubr)
+  library(ggrepel)
+})
+# ---- Transparent background theme patch ----
+transparent_theme <- theme(
+  plot.background       = element_rect(fill = "transparent", colour = NA),
+  panel.background      = element_rect(fill = "transparent", colour = NA),
+  legend.background     = element_rect(fill = "transparent", colour = NA),
+  legend.box.background = element_rect(fill = "transparent", colour = NA),
+  legend.key            = element_rect(fill = "transparent", colour = NA)
+)
+```
+
+
+```{r filter-vehicle-il34pos}
+# Focus on IL34-positive vehicle samples across three experiments.
+# IL34pos is the standard iMGL culture condition used throughout Figures 2-5.
+veh <- scores_all %>%
+  filter(Stimulus == "Vehicle", IL34 == "pos") %>%
+  mutate(Experiment = factor(Experiment, levels = c("Exp1", "Exp2", "Exp3")))
+
+cat("Vehicle (IL34+) profiles used:", nrow(veh), "\n")
+cat("Breakdown:\n"); print(table(veh$Experiment, veh$Time_hr))
+
+var_exp <- pca_model$sdev^2 / sum(pca_model$sdev^2)
+pc1_lab <- sprintf("PC1 (%.1f%%)", 100 * var_exp[1])
+pc2_lab <- sprintf("PC2 (%.1f%%)", 100 * var_exp[2])
+```
+
+```{r panel-A-trajectories}
+# Per-(Experiment, Time) median PC coordinates (averaging across the 6 FOVs)
+traj <- veh %>%
+  group_by(Experiment, Time_hr) %>%
+  summarise(PC1 = median(PC1), PC2 = median(PC2), .groups = "drop") %>%
+  arrange(Experiment, Time_hr)
+
+exp_colors <- c("Exp1" = "#E64B35", "Exp2" = "#4DBBD5", "Exp3" = "#00A087")
+
+# Reference: LPS+IFNγ endpoint for scale context
+lps_ref <- scores_all %>%
+  filter(Stimulus == "LPS+IFNg", IL34 == "pos", Time_hr == 24) %>%
+  group_by(Experiment) %>%
+  summarise(PC1 = mean(PC1), PC2 = mean(PC2), .groups = "drop")
+
+p_traj <- ggplot(traj, aes(PC1, PC2, color = Experiment, group = Experiment)) +
+  # LPS reference points (drawn first so they're in the background)
+geom_point(data = lps_ref, aes(PC1, PC2),
+           color = "grey60", size = 3.5, shape = 4, stroke = 1.2,
+           alpha = 0.7,
+           inherit.aes = FALSE) +
+  geom_text(data = lps_ref %>% slice(1), aes(PC1, PC2),
+            label = "LPS+IFNγ (24h)", color = "grey50",
+            vjust = -1.2, size = 3, inherit.aes = FALSE) +
+  # Vehicle trajectories
+  geom_path(linewidth = 0.9, alpha = 0.85) +
+  geom_point(aes(size = Time_hr)) +
+  scale_size_continuous(range = c(2, 5), name = "Time (h)",
+                        breaks = c(0, 8, 16, 24)) +
+  scale_color_manual(values = exp_colors) +
+  ggrepel::geom_text_repel(
+    data = traj %>% group_by(Experiment) %>% slice_max(Time_hr, n = 1),
+    aes(label = Experiment),
+    size = 3.8, show.legend = FALSE,
+    box.padding = 0.3, segment.color = "grey60"
+  ) +
+  theme_classic(base_size = 12) +
+  labs(
+    title = "Vehicle morphology trajectories across 3 independent experiments",
+    x = pc1_lab, y = pc2_lab
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.position = "right"
+  )
+```
+
+```{r panel-B-signal-to-noise}
+# Profile distance in the full centered feature space (not just PC1-2).
+# Technical noise  = same timepoint, different experiments, both Vehicle IL34+.
+# Biological signal = same timepoint, same experiment, Vehicle vs LPS+IFNg (IL34+).
+
+profile_mat <- dat_image %>%
+  filter(IL34 == "pos", Stimulus %in% c("Vehicle", "LPS+IFNg")) %>%
+  group_by(Experiment, Stimulus, Time_hr) %>%
+  summarise(across(all_of(final_features), \(x) mean(x, na.rm = TRUE)),
+            .groups = "drop")
+
+get_vec <- function(exp, stim, t) {
+  row <- profile_mat %>%
+    filter(Experiment == exp, Stimulus == stim, Time_hr == t)
+  if (nrow(row) == 0) return(NULL)
+  as.numeric(row[, final_features])
+}
+
+times     <- sort(unique(profile_mat$Time_hr))
+exps      <- c("Exp1", "Exp2", "Exp3")
+exp_pairs <- combn(exps, 2, simplify = FALSE)
+
+# 1. Within-vehicle, across experiments (technical noise)
+tech_noise <- map_dfr(times, function(t) {
+  map_dfr(exp_pairs, function(pp) {
+    v1 <- get_vec(pp[1], "Vehicle", t)
+    v2 <- get_vec(pp[2], "Vehicle", t)
+    if (is.null(v1) || is.null(v2)) return(NULL)
+    tibble(t = t, pair = paste(pp, collapse = "-"),
+           d = sqrt(sum((v1 - v2)^2)),
+           type = "Within-Vehicle\n(cross-experiment)")
+  })
+})
+
+# 2. Vehicle vs LPS+IFNg, within experiment (biological signal)
+bio_signal <- map_dfr(times, function(t) {
+  map_dfr(exps, function(e) {
+    v1 <- get_vec(e, "Vehicle", t)
+    v2 <- get_vec(e, "LPS+IFNg", t)
+    if (is.null(v1) || is.null(v2)) return(NULL)
+    tibble(t = t, pair = e,
+           d = sqrt(sum((v1 - v2)^2)),
+           type = "Vehicle vs LPS+IFNγ\n(within-experiment)")
+  })
+})
+
+# ── Combine timepoint-level data (for display only) ───────────────────────────
+dist_df <- bind_rows(tech_noise, bio_signal) %>%
+  mutate(type = factor(type, levels = c(
+    "Within-Vehicle\n(cross-experiment)",
+    "Vehicle vs LPS+IFNγ\n(within-experiment)"
+  )))
+
+# ── FIX: Aggregate to experiment/pair level before statistical test ───────────
+# Mirrors Figure 3: image → experiment → test, avoiding pseudoreplication
+# Here: timepoint-distances → pair/experiment-mean → t-test
+#
+# tech_noise: 3 experiment-pairs × 4 timepoints → average → 3 means
+# bio_signal: 3 experiments    × 4 timepoints → average → 3 means
+
+tech_noise_agg <- tech_noise %>%
+  group_by(pair) %>%
+  summarise(d_mean = mean(d), .groups = "drop") %>%
+  mutate(type = "Within-Vehicle\n(cross-experiment)")
+
+bio_signal_agg <- bio_signal %>%
+  group_by(pair) %>%
+  summarise(d_mean = mean(d), .groups = "drop") %>%
+  mutate(type = "Vehicle vs LPS+IFNγ\n(within-experiment)")
+
+dist_agg <- bind_rows(tech_noise_agg, bio_signal_agg) %>%
+  mutate(type = factor(type, levels = levels(dist_df$type)))
+
+# t-test on experiment-level means (n = 3 per group)
+tt_res <- t.test(
+  dist_agg$d_mean[dist_agg$type == "Within-Vehicle\n(cross-experiment)"],
+  dist_agg$d_mean[dist_agg$type == "Vehicle vs LPS+IFNγ\n(within-experiment)"]
+)
+
+cat("\nExperiment-level summary (mean across timepoints):\n")
+print(dist_agg %>%
+        group_by(type) %>%
+        summarise(n = n(), mean_d = mean(d_mean), sd_d = sd(d_mean)))
+
+cat(sprintf(
+  "\nWelch t-test on experiment-level means (n=3 per group):\n  t = %.3f, df = %.2f, p = %.4f\n",
+  tt_res$statistic, tt_res$parameter, tt_res$p.value
+))
+
+# Save stats
+write.csv(
+  tibble(
+    contrast    = "Vehicle vs LPS+IFNg / cross-exp noise",
+    n_units     = 3,
+    mean_noise  = mean(tech_noise_agg$d_mean),
+    mean_signal = mean(bio_signal_agg$d_mean),
+    t           = tt_res$statistic,
+    df          = tt_res$parameter,
+    p_value     = tt_res$p.value,
+    ci_lower    = tt_res$conf.int[1],
+    ci_upper    = tt_res$conf.int[2]
+  ),
+  paste0(FIG_PREFIX, "_B_snr_stats.csv"),
+  row.names = FALSE
+)
+
+# ── Plot ──────────────────────────────────────────────────────────────────────
+# Background jitter = per-timepoint distances (context only, not tested)
+# Filled diamonds   = experiment-level means (the actual statistical units)
+# Annotation        = t-test result on those means
+
+y_bracket <- max(dist_df$d) * 1.08
+y_label   <- max(dist_df$d) * 1.14
+p_label   <- if (tt_res$p.value < 0.001) "p < 0.001" else
+             sprintf("p = %.3f", tt_res$p.value)
+
+p_quant <- ggplot(dist_df, aes(type, d, fill = type)) +
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.55) +
+  geom_jitter(aes(color = type), width = 0.12, size = 1.4,
+              alpha = 0.35, show.legend = FALSE) +
+  # Experiment-level means as solid diamonds (the n=3 statistical units)
+  geom_point(data = dist_agg, aes(type, d_mean),
+             shape = 18, size = 5, color = "black",
+             inherit.aes = FALSE) +
+  # Manual significance bracket from experiment-level t-test
+  annotate("segment",
+           x = 1, xend = 2, y = y_bracket, yend = y_bracket) +
+  annotate("segment",
+           x = 1, xend = 1,
+           y = y_bracket, yend = y_bracket - max(dist_df$d) * 0.02) +
+  annotate("segment",
+           x = 2, xend = 2,
+           y = y_bracket, yend = y_bracket - max(dist_df$d) * 0.02) +
+  annotate("text", x = 1.5, y = y_label,
+           label = sprintf("%s\n(t-test, n=3 experiments)", p_label),
+           size = 3.8, lineheight = 0.9) +
+  scale_fill_manual(values  = c("#2E86AB", "#CC0033"), guide = "none") +
+  scale_color_manual(values = c("#2E86AB", "#CC0033")) +
+  coord_cartesian(ylim = c(0, max(dist_df$d) * 1.22)) +
+  theme_classic(base_size = 12) +
+  labs(
+    title    = "Baseline variation vs stimulus effect",
+    subtitle = "Vehicle variability is smaller than the LPS+IFNγ-induced shift",
+    x        = NULL,
+    y        = "Euclidean distance in feature space"
+  ) +
+  theme(
+    plot.title    = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 11),
+    axis.text.x   = element_text(size = 10)
+  )
+```
+
+```{r combine-save, fig.width=16, fig.height=5}
+p_final <- p_traj + p_quant + patchwork::plot_layout(widths = c(1.5, 1))
+p_final
+
+# Apply transparent theme to all sub-plots via patchwork's `&` operator
+p_final_transparent <- p_final & transparent_theme
+
+ggsave(paste0(FIG_PREFIX, "_reproducibility.png"),
+       p_final_transparent, width = 14, height = 5, dpi = 600, bg = "transparent")
+ggsave(paste0(FIG_PREFIX, "_reproducibility.pdf"),
+       p_final_transparent, width = 16, height = 5, bg = "transparent")
+
+cat("\nSaved: ", FIG_PREFIX, "_reproducibility.{png,pdf}\n", sep = "")
+```

@@ -1,0 +1,170 @@
+---
+title: "Figure S — Single-cell state fractions across all time points"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = here::here())
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, cache = FALSE)
+
+if (!exists("cp_all") || !exists("assign_cells_to_nearest_anchor")) {
+  source(here::here("R", "load_and_preprocess.R"))
+}
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(patchwork)
+})
+
+ANCHOR_FILE <- here::here("R", "state_anchors.rds")
+anchor_bundle <- readRDS(ANCHOR_FILE)
+state_anchors <- anchor_bundle$anchors
+state_scaling <- anchor_bundle$scaling
+
+OUT_DIR <- here::here("output")
+FIG_PREFIX <- file.path(OUT_DIR, "FigureS_timecourse")
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+TREATMENTS_6  <- c("Vehicle","LPS","IFNg","IL1beta","IL6","TNFa")
+TREATMENTS_F3 <- c("Vehicle","LPS+IFNg")
+STATE_LEVELS  <- c("Elongated","Spread","Ramified","Small_Round")
+STATE_COLORS  <- c("Elongated"="#FF85C0","Spread"="#00CED1",
+                   "Ramified"="#FFD700","Small_Round"="#8B4513")
+PAL_6         <- c("Vehicle"="black","LPS"="#AB3A29","IFNg"="#D07F2C",
+                   "IL1beta"="#1E7C4A","IL6"="#6F6DA1","TNFa"="#6990A2",
+                   "LPS+IFNg"="#7B1E1E")
+```
+
+```{r compute-state-fractions-all-timepoints}
+# Assign EVERY cell in the pipeline (all stimuli, all time points, IL34+) 
+# to its nearest anchor. No downsampling, no UMAP. Outputs:
+#   - frac_image: fraction per image
+#   - frac_exp:   experiment-level mean of image fractions
+#   - frac_summary: mean ± SE across 3 experiments
+
+all_times   <- sort(unique(meta_all$Time_hr))
+stimuli_all <- union(TREATMENTS_F3, TREATMENTS_6)
+
+log_cols_actual <- intersect(LOG_COLS, final_features)
+
+sc_timecourse <- cp_all %>%
+  inner_join(
+    meta_all %>% select(ImageNumber, Experiment, Stimulus, IL34, Time_hr, Well),
+    by = "ImageNumber"
+  ) %>%
+  filter(IL34 == "pos", Stimulus %in% stimuli_all,
+         complete.cases(across(all_of(final_features)))) %>%
+  mutate(across(all_of(log_cols_actual), log1p)) %>%
+  left_join(exp_offset, by = "Experiment", suffix = c("", ".exp")) %>%
+  mutate(across(all_of(final_features),
+                ~ .x - get(paste0(cur_column(), ".exp")))) %>%
+  select(-ends_with(".exp"))
+
+cat(sprintf("Total cells in time course: %d\n", nrow(sc_timecourse)))
+
+sc_timecourse <- sc_timecourse %>% add_morphology_axes(scaling = state_scaling)
+state_axes <- c("z_elong","z_size","z_round")
+sc_timecourse <- sc_timecourse[complete.cases(sc_timecourse[, state_axes]), ]
+sc_timecourse$State <- factor(
+  assign_cells_to_nearest_anchor(sc_timecourse, state_anchors),
+  levels = STATE_LEVELS)
+
+# Image-level state fractions
+frac_image <- sc_timecourse %>%
+  count(Time_hr, Experiment, Stimulus, ImageNumber, State) %>%
+  complete(nesting(Time_hr, Experiment, Stimulus, ImageNumber),
+           State = STATE_LEVELS, fill = list(n = 0)) %>%
+  group_by(Time_hr, Experiment, Stimulus, ImageNumber) %>%
+  mutate(Fraction = n / sum(n)) %>% ungroup()
+
+# Experiment-level (mean across images)
+frac_exp <- frac_image %>%
+  group_by(Time_hr, Experiment, Stimulus, State) %>%
+  summarise(Fraction = mean(Fraction), .groups = "drop")
+
+# Group-level (mean ± SE across 3 experiments)
+frac_summary <- frac_exp %>%
+  group_by(Time_hr, Stimulus, State) %>%
+  summarise(mean_f = mean(Fraction),
+            sd_f   = sd(Fraction),
+            n      = n(),
+            se_f   = sd_f / sqrt(n),
+            .groups = "drop")
+
+write.csv(frac_summary, paste0(FIG_PREFIX, "_summary.csv"), row.names = FALSE)
+write.csv(frac_exp,     paste0(FIG_PREFIX, "_per_experiment.csv"), row.names = FALSE)
+cat("\nSaved summary CSVs\n")
+```
+
+```{r plot-fig3-context, fig.width=10, fig.height=7}
+# Figure 3 context: Vehicle vs LPS+IFNg
+df_f3 <- frac_summary %>% filter(Stimulus %in% TREATMENTS_F3)
+
+p_f3 <- ggplot(df_f3, aes(Time_hr, mean_f, color = Stimulus, fill = Stimulus)) +
+  geom_ribbon(aes(ymin = pmax(0, mean_f - se_f), ymax = mean_f + se_f),
+              alpha = 0.2, color = NA) +
+  geom_vline(xintercept = c(4, 24), linetype = "dashed",
+             color = "grey70", linewidth = 0.4) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.8) +
+  facet_wrap(~ State, ncol = 2) +
+  scale_color_manual(values = PAL_6,
+                     labels = c("Vehicle", expression("LPS+"*IFN*gamma))) +
+  scale_fill_manual(values = PAL_6, guide = "none") +
+  scale_x_continuous(breaks = all_times) +
+  theme_classic(base_size = 11) +
+  labs(title = "State fraction time course — Vehicle vs LPS+IFNγ",
+       subtitle = "Mean ± SE across 3 experiments; dashed lines = pre-specified 4h, 24h",
+       x = "Time (h)", y = "State fraction") +
+  theme(legend.position = "top",
+        plot.title = element_text(face = "bold"),
+        strip.background = element_rect(fill = "grey95"))
+
+p_f3
+
+ggsave(paste0(FIG_PREFIX, "_Fig3context.png"), p_f3 & transparent_theme,
+       width = 10, height = 7, dpi = 600, bg = "transparent")
+ggsave(paste0(FIG_PREFIX, "_Fig3context.pdf"), p_f3 & transparent_theme,
+       width = 10, height = 7, bg = "transparent")
+```
+
+```{r plot-fig5-context, fig.width=12, fig.height=7}
+# Figure 5 context: 6 cytokines
+df_f5 <- frac_summary %>% filter(Stimulus %in% TREATMENTS_6)
+
+p_f5 <- ggplot(df_f5, aes(Time_hr, mean_f, color = Stimulus, fill = Stimulus)) +
+  geom_ribbon(aes(ymin = pmax(0, mean_f - se_f), ymax = mean_f + se_f),
+              alpha = 0.15, color = NA) +
+  geom_vline(xintercept = c(4, 24), linetype = "dashed",
+             color = "grey70", linewidth = 0.4) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.4) +
+  facet_wrap(~ State, ncol = 2) +
+ scale_color_manual(
+  values = PAL_6,
+  labels = c(
+    "Vehicle" = "Vehicle",
+    "LPS"     = "LPS",
+    "IFNg"    = expression(IFN*gamma),
+    "IL1beta" = expression(IL-1*beta),
+    "IL6"     = "IL-6",
+    "TNFa"    = expression(TNF*alpha)
+  )
+) +
+  scale_fill_manual(values = PAL_6, guide = "none") +
+  scale_x_continuous(breaks = all_times) +
+  theme_classic(base_size = 11) +
+  labs(title = "State fraction time course — 6 cytokines",
+       subtitle = "Mean ± SE across 3 experiments; dashed lines = pre-specified 4h, 24h",
+       x = "Time (h)", y = "State fraction") +
+  theme(legend.position = "top",
+        plot.title = element_text(face = "bold"),
+        strip.background = element_rect(fill = "grey95"))
+
+p_f5
+
+ggsave(paste0(FIG_PREFIX, "_Fig5context.png"), p_f5 & transparent_theme,
+       width = 12, height = 7, dpi = 600, bg = "transparent")
+ggsave(paste0(FIG_PREFIX, "_Fig5context.pdf"), p_f5 & transparent_theme,
+       width = 12, height = 7, bg = "transparent")
+```

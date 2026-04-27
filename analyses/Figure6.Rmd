@@ -1,0 +1,731 @@
+
+---
+title: "Figure 6 — ROS × Morphological State Analysis at 24 hr"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(here)
+knitr::opts_knit$set(root.dir = here::here())
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, cache = FALSE)
+
+if (!exists("final_features") || !exists("add_morphology_axes") ||
+    !exists("assign_cells_to_nearest_anchor")) {
+  source(here::here("R", "load_and_preprocess.R"))
+}
+required_pkgs <- c("lme4", "lmerTest", "emmeans")
+missing_pkgs <- required_pkgs[!sapply(required_pkgs, requireNamespace, quietly = TRUE)]
+if (length(missing_pkgs) > 0) {
+  install.packages(missing_pkgs, repos = "https://cloud.r-project.org")
+}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(patchwork)
+  library(ggpubr)
+  library(ggrepel)
+  library(lme4)
+  library(lmerTest)
+  library(emmeans)
+})
+
+ANCHOR_FILE <- here::here("R", "state_anchors.rds")
+stopifnot(file.exists(ANCHOR_FILE))
+
+OUT_DIR    <- here::here("output")
+FIG_PREFIX <- file.path(OUT_DIR, "Figure6")
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+# Load frozen anchors + scaling (same as Figure 3/5)
+anchor_bundle <- readRDS(ANCHOR_FILE)
+state_anchors <- anchor_bundle$anchors
+state_scaling <- anchor_bundle$scaling
+cat("Loaded anchors:\n"); print(state_anchors)
+cat("\nLoaded scaling:\n"); print(state_scaling)
+
+# ---- Config ----
+TREATMENTS_6 <- c("Vehicle", "LPS", "IFNg", "IL1beta", "IL6", "TNFa")
+target_stimuli <- setdiff(TREATMENTS_6, "Vehicle")
+STATE_LEVELS <- c("Elongated","Spread","Ramified","Small_Round")
+
+STATE_COLORS <- c(
+  "Elongated"   = "#FF85C0",
+  "Spread"      = "#00CED1",
+  "Ramified"    = "#FFD700",
+  "Small_Round" = "#8B4513"
+)
+PAL_6 <- c(
+  "Vehicle" = "black", "LPS" = "#AB3A29", "IFNg" = "#D07F2C",
+  "IL1beta" = "#1E7C4A", "IL6" = "#6F6DA1", "TNFa" = "#6990A2"
+)
+
+treatment_math_labels <- function(x) {
+  x <- as.character(x)
+  x <- gsub("TNFa",    "TNF*alpha", x)
+  x <- gsub("IL1beta", "IL-1*beta", x)
+  x <- gsub("IFNg",    "IFN*gamma", x)
+  x
+}
+
+transparent_theme <- theme(
+  plot.background       = element_rect(fill = "transparent", colour = NA),
+  panel.background      = element_rect(fill = "transparent", colour = NA),
+  legend.background     = element_rect(fill = "transparent", colour = NA),
+  legend.box.background = element_rect(fill = "transparent", colour = NA),
+  legend.key            = element_rect(fill = "transparent", colour = NA)
+)
+```
+
+```{r load-and-merge}
+ros_raw <- read_csv("data/24h_ROS_dataset.csv", show_col_types = FALSE)
+ros_meta <- read_csv("data/24h_ROS_Metadata.csv", show_col_types = FALSE)
+
+cat("Raw cells:", nrow(ros_raw), " | Metadata images:", nrow(ros_meta), "\n")
+
+ros_raw <- ros_raw %>%
+  left_join(ros_meta %>% select(ImageNumber, Filename, Treatment, Batch),
+            by = "ImageNumber") %>%
+  rename(Experiment = Batch, Stimulus = Treatment) %>%
+  mutate(
+    Experiment = case_when(
+      Experiment %in% c("exp1","Exp1") ~ "Exp1",
+      Experiment %in% c("exp2","Exp2") ~ "Exp2",
+      Experiment %in% c("exp3","Exp3") ~ "Exp3",
+      TRUE ~ Experiment),
+    Stimulus = case_when(
+      Stimulus == "IFNr" ~ "IFNg",
+      TRUE ~ Stimulus)
+  )
+
+cat("\nStimulus x Experiment:\n")
+print(table(ros_raw$Stimulus, ros_raw$Experiment, useNA = "ifany"))
+```
+
+```{r ros-column}
+ROS_COL <- "Intensity_MeanIntensity_Gray"
+stopifnot(ROS_COL %in% names(ros_raw))
+ros_raw$ROS_intensity <- ros_raw[[ROS_COL]]
+
+cat(sprintf("\nROS range: [%.4f, %.4f], median: %.4f\n",
+            min(ros_raw$ROS_intensity, na.rm = TRUE),
+            max(ros_raw$ROS_intensity, na.rm = TRUE),
+            median(ros_raw$ROS_intensity, na.rm = TRUE)))
+```
+
+```{r preprocess-morphology}
+# Methodologically consistent with main pipeline:
+# (1) log1p transform on LOG_COLS
+# (2) Per-experiment Vehicle-based centering, computed at IMAGE level
+#     (not cell level; avoids weighting by image cell count)
+# (3) Fixed anchor scaling for z-axes
+
+LOG_COLS_ACTUAL <- intersect(LOG_COLS, final_features)
+
+missing_feat <- setdiff(final_features, names(ros_raw))
+if (length(missing_feat) > 0) {
+  stop("ROS dataset missing morphology features: ",
+       paste(missing_feat, collapse = ", "))
+}
+
+# ---- Compute Vehicle-based centering at IMAGE level ----
+# 1) log-transform cell-level data
+# 2) aggregate to image-level means (Vehicle only)
+# 3) take unweighted experiment mean of image-level means
+# This matches the baseline definition used in load_and_preprocess.R
+ros_offset <- ros_raw %>%
+  mutate(across(all_of(LOG_COLS_ACTUAL), log1p)) %>%
+  filter(Stimulus == "Vehicle",
+         complete.cases(across(all_of(final_features)))) %>%
+  group_by(Experiment, ImageNumber) %>%                                      # image-level
+  summarise(across(all_of(final_features), \(x) mean(x, na.rm = TRUE)),
+            .groups = "drop") %>%
+  group_by(Experiment) %>%                                                    # experiment-level
+  summarise(across(all_of(final_features), \(x) mean(x, na.rm = TRUE)),
+            .groups = "drop")
+
+cat("Vehicle-based centering offset (image-level aggregation, per experiment):\n")
+print(ros_offset)
+
+ros_centered <- ros_raw %>%
+  mutate(AreaShape_Area_raw = AreaShape_Area) %>%
+  mutate(across(all_of(LOG_COLS_ACTUAL), log1p)) %>%
+  left_join(ros_offset, by = "Experiment", suffix = c("", ".off")) %>%
+  mutate(across(all_of(final_features),
+                ~ .x - get(paste0(cur_column(), ".off")))) %>%
+  select(-ends_with(".off"))
+
+cat(sprintf("\nCentered: %d cells\n", nrow(ros_centered)))
+```
+
+```{r assign-states}
+# Apply frozen anchor scaling, then classify to nearest anchor.
+# Same coordinate system as Figure 3 and Figure 5.
+
+ros_axed <- ros_centered %>% add_morphology_axes(scaling = state_scaling)
+
+state_axes <- c("z_elong", "z_size", "z_round")
+keep_rows <- complete.cases(ros_axed[, state_axes])
+cat(sprintf("Cells with complete z-axes: %d / %d (dropped %d)\n",
+            sum(keep_rows), nrow(ros_axed), sum(!keep_rows)))
+
+ros_final <- ros_axed[keep_rows, ]
+ros_final$State <- factor(
+  assign_cells_to_nearest_anchor(ros_final, state_anchors),
+  levels = STATE_LEVELS
+)
+ros_final$Stimulus   <- factor(ros_final$Stimulus, levels = TREATMENTS_6)
+ros_final$Experiment <- factor(ros_final$Experiment, levels = c("Exp1","Exp2","Exp3"))
+
+cat("\nFinal state distribution:\n")
+print(table(ros_final$State))
+cat("\nState x Treatment:\n")
+print(table(ros_final$State, ros_final$Stimulus))
+```
+
+```{r ros-summaries}
+cat("\n======= ROS by Treatment =======\n")
+print(ros_final %>%
+  group_by(Stimulus) %>%
+  summarise(n = n(),
+            mean_ROS   = mean(ROS_intensity, na.rm = TRUE),
+            median_ROS = median(ROS_intensity, na.rm = TRUE),
+            sd_ROS     = sd(ROS_intensity, na.rm = TRUE),
+            .groups = "drop"))
+
+cat("\n======= ROS by State =======\n")
+print(ros_final %>%
+  group_by(State) %>%
+  summarise(n = n(),
+            mean_ROS   = mean(ROS_intensity, na.rm = TRUE),
+            median_ROS = median(ROS_intensity, na.rm = TRUE),
+            sd_ROS     = sd(ROS_intensity, na.rm = TRUE),
+            .groups = "drop"))
+```
+
+```{r panel-B-ros-per-treatment, fig.width=6, fig.height=3}
+# Panel B: ROS change vs Vehicle per cytokine.
+# Statistical approach: LMM with Experiment as random effect, followed by
+# Dunnett's many-to-one comparisons (all treatments vs Vehicle).
+# Rationale:
+#  - Dunnett is designed for the treatment-vs-control design and is more
+#    powerful than BH-FDR, which treats comparisons as independent.
+#  - LMM pools variance across all groups (df ~ 12 instead of n-1 = 2),
+#    substantially improving power at n=3.
+#  - log(fc) is used instead of raw delta so the test target matches
+#    Panel C (H0: fold change = 1) and normalizes the multiplicative
+#    measurement noise typical of fluorescence intensity.
+
+# ---- Image-level medians (keep image-level variance in the LMM) ----
+ros_per_image <- ros_final %>%
+  group_by(Stimulus, Experiment, ImageNumber) %>%
+  summarise(median_ROS = median(ROS_intensity, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Stimulus = factor(Stimulus, levels = TREATMENTS_6))
+
+# ---- Experiment-level summaries for plotting ----
+ros_per_exp <- ros_per_image %>%
+  group_by(Stimulus, Experiment) %>%
+  summarise(median_ROS = median(median_ROS, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Stimulus = factor(Stimulus, levels = TREATMENTS_6))
+
+veh_exp <- ros_per_exp %>%
+  filter(Stimulus == "Vehicle") %>%
+  select(Experiment, veh_median = median_ROS)
+
+ros_delta <- ros_per_exp %>%
+  left_join(veh_exp, by = "Experiment") %>%
+  mutate(
+    delta_ROS = median_ROS - veh_median)
+
+# ---- Fit LMM on log-ROS at image level ----
+# Random effect: Experiment (3 batches)
+# Fixed effect: Stimulus (6 levels, Vehicle = reference)
+lmm_data <- ros_per_exp %>%
+  mutate(log_ROS = log(median_ROS)) %>%
+  filter(is.finite(log_ROS))
+
+m_lmm <- lmer(log_ROS ~ Stimulus + (1 | Experiment),
+              data = lmm_data)
+
+# ---- Dunnett's test: each cytokine vs Vehicle ----
+emm <- emmeans(m_lmm, ~ Stimulus)
+dunnett <- contrast(emm, method = "trt.vs.ctrl", ref = "Vehicle")
+dunnett_summary <- summary(dunnett, adjust = "mvt", infer = c(TRUE, TRUE))
+dunnett_ci      <- confint(dunnett, adjust = "mvt")
+
+pval_B <- tibble(
+  contrast    = as.character(dunnett_summary$contrast),
+  estimate_log = dunnett_summary$estimate,        # log fold change
+  SE           = dunnett_summary$SE,
+  df           = dunnett_summary$df,
+  t.ratio      = dunnett_summary$t.ratio,
+  p.value      = dunnett_summary$p.value,         # mvt-adjusted
+  ci_lo_log    = dunnett_ci$lower.CL,
+  ci_hi_log    = dunnett_ci$upper.CL
+) %>%
+  mutate(
+    Stimulus = sub(" - Vehicle", "", contrast),
+    Stimulus = factor(Stimulus, levels = TREATMENTS_6),
+    fc       = exp(estimate_log),
+    fc_lo    = exp(ci_lo_log),
+    fc_hi    = exp(ci_hi_log),
+    x_pos    = match(as.character(Stimulus), TREATMENTS_6),
+    sig_mark = case_when(
+      is.na(p.value)   ~ "",
+      p.value < 0.001  ~ "***",
+      p.value < 0.01   ~ "**",
+      p.value < 0.05   ~ "*",
+      p.value < 0.1    ~ ".",
+      TRUE             ~ "ns"
+    )
+  )
+
+cat("\n--- Panel B: LMM + Dunnett (vs Vehicle), mvt-adjusted ---\n")
+print(pval_B %>%
+        select(Stimulus, estimate_log, SE, df, t.ratio, p.value,
+               fc, fc_lo, fc_hi, sig_mark) %>%
+        mutate(across(where(is.numeric), ~ signif(., 3))))
+
+write.csv(pval_B, paste0(FIG_PREFIX, "_B_ros_treatment_stats.csv"),
+          row.names = FALSE)
+
+# ---- Plot: experiment-level deltas + mean with 95% CI crossbar ----
+# CI is computed from the LMM contrasts (log scale) and back-transformed
+# via the Vehicle baseline, so the crossbars reflect the actual inference.
+veh_baseline <- mean(veh_exp$veh_median, na.rm = TRUE)
+
+ci_for_plot <- pval_B %>%
+  mutate(
+    delta_hat   = veh_baseline * (fc   - 1),
+    delta_ci_lo = veh_baseline * (fc_lo - 1),
+    delta_ci_hi = veh_baseline * (fc_hi - 1)
+  ) %>%
+  select(Stimulus, delta_hat, delta_ci_lo, delta_ci_hi)
+
+# Add a Vehicle row (reference, delta = 0, no CI)
+ci_for_plot <- bind_rows(
+  tibble(Stimulus = factor("Vehicle", levels = TREATMENTS_6),
+         delta_hat = 0, delta_ci_lo = NA_real_, delta_ci_hi = NA_real_),
+  ci_for_plot
+)
+
+# Dynamic y limits
+all_y <- c(ros_delta$delta_ROS, ci_for_plot$delta_ci_lo, ci_for_plot$delta_ci_hi, 0)
+yr   <- range(all_y, na.rm = TRUE)
+pad  <- max(diff(yr) * 0.18, 0.0008)
+star_y <- max(all_y, na.rm = TRUE) + pad * 0.55
+y_min  <- min(all_y, na.rm = TRUE) - pad * 0.35
+y_max  <- star_y + pad * 0.35
+
+p_B <- ggplot(ros_delta, aes(Stimulus, delta_ROS, color = Stimulus)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40",
+             linewidth = 0.4) +
+  # 95% CI from LMM/Dunnett
+  geom_errorbar(
+    data = ci_for_plot %>% filter(!is.na(delta_ci_lo)),
+    aes(x = Stimulus, ymin = delta_ci_lo, ymax = delta_ci_hi),
+    inherit.aes = FALSE,
+    width = 0.25, color = "grey30", linewidth = 0.4
+  ) +
+  # Point estimate crossbar
+  geom_crossbar(
+    data = ci_for_plot,
+    aes(x = Stimulus, y = delta_hat,
+        ymin = delta_hat, ymax = delta_hat),
+    inherit.aes = FALSE,
+    width = 0.6, color = "black", linewidth = 0.45
+  ) +
+  # Individual experiments
+  geom_point(aes(shape = Experiment), size = 2.2,
+             position = position_jitter(width = 0.08, height = 0)) +
+  # Significance marks
+  annotate("text",
+           x = pval_B$x_pos, y = star_y,
+           label = pval_B$sig_mark, size = 4, fontface = "bold") +
+  scale_color_manual(values = PAL_6, guide = "none") +
+  scale_shape_manual(values = c("Exp1" = 16, "Exp2" = 17, "Exp3" = 15)) +
+  scale_x_discrete(
+    limits = TREATMENTS_6,
+    labels = function(x) parse(text = treatment_math_labels(x))
+  ) +
+  coord_cartesian(ylim = c(y_min, y_max)) +
+  theme_classic(base_size = 11) +
+  labs(
+    title    = "ROS change relative to Vehicle (24 hr)",
+    subtitle = "LMM on log(ROS) with Experiment as random effect; Dunnett's test vs Vehicle (mvt-adjusted)\nCrossbar = LMM estimate; whiskers = 95% CI; points = independent experiments",
+    x = NULL,
+    y = expression(atop(Delta ~ "median CellROX intensity", "(A.U., relative to Vehicle)"))
+  ) +
+  theme(plot.title    = element_text(face = "bold", size = 12),
+        plot.subtitle = element_text(size = 8, color = "grey40"))
+
+p_B
+```
+
+```{r panel-C-ros-fold-change, fig.width=12, fig.height=4}
+# Panel C: ROS fold change vs Vehicle, per (state × cytokine).
+# Reports all 5 cytokines; avoids selecting IFNγ a priori from the same data
+# that generated the morphology hypothesis.
+
+fc_data_exp <- ros_final %>%
+  group_by(Experiment, Stimulus, State) %>%
+  summarise(median_ROS = median(ROS_intensity, na.rm = TRUE),
+            .groups = "drop")
+
+# Pair each cytokine with Vehicle within the same (Experiment, State)
+fc_wide <- fc_data_exp %>%
+  pivot_wider(names_from = Stimulus, values_from = median_ROS)
+
+fc_long <- lapply(target_stimuli, function(stim) {
+  fc_wide %>%
+    select(Experiment, State, Vehicle, all_of(stim)) %>%
+    rename(Treatment = !!stim) %>%
+    mutate(Stimulus = stim,
+           fc     = Treatment / Vehicle,
+           log_fc = log(fc))
+}) %>% bind_rows()
+
+fc_stats <- fc_long %>%
+  group_by(Stimulus, State) %>%
+  summarise(
+    n         = sum(!is.na(log_fc)),
+    geomean_fc = exp(mean(log_fc, na.rm = TRUE)),   # geometric mean (matches t-test point estimate)
+    tt        = list(
+      if (sum(!is.na(log_fc)) >= 3)
+        tryCatch(t.test(log_fc, mu = 0), error = function(e) NULL)
+      else NULL
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p.value = map_dbl(tt, ~ if (is.null(.x)) NA_real_ else .x$p.value),
+    ci_lo   = map_dbl(tt, ~ if (is.null(.x)) NA_real_ else exp(.x$conf.int[1])),
+    ci_hi   = map_dbl(tt, ~ if (is.null(.x)) NA_real_ else exp(.x$conf.int[2]))
+  ) %>%
+  select(-tt) %>%
+  mutate(
+    FDR = p.adjust(p.value, method = "BH"),
+    sig_mark = case_when(
+      is.na(FDR)   ~ "",
+      FDR < 0.001  ~ "***",
+      FDR < 0.01   ~ "**",
+      FDR < 0.05   ~ "*",
+      TRUE         ~ "ns"
+    ),
+    Stimulus = factor(Stimulus, levels = target_stimuli),
+    State    = factor(State, levels = STATE_LEVELS)
+  )
+
+cat("\n--- Panel C: ROS fold change (cytokine/Vehicle) per state ---\n")
+print(fc_stats %>% mutate(across(where(is.numeric), ~ signif(., 3))))
+
+write.csv(fc_stats, paste0(FIG_PREFIX, "_C_ros_foldchange_stats.csv"),
+          row.names = FALSE)
+
+p_C <- ggplot(fc_stats, aes(State, geomean_fc, fill = State)) +
+  geom_col(width = 0.6, alpha = 0.85) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), width = 0.2, linewidth = 0.4) +
+  geom_hline(yintercept = 1.0, linetype = "dashed", color = "grey40") +
+  geom_text(aes(y = ci_hi,
+                label = sprintf("%.2f %s", geomean_fc, sig_mark)),
+            vjust = -0.6, size = 3) +
+  facet_wrap(~ Stimulus, nrow = 1,
+             labeller = labeller(Stimulus = function(x)
+               parse(text = treatment_math_labels(x)))) +
+  scale_fill_manual(values = STATE_COLORS, guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+  theme_classic(base_size = 11) +
+  labs(
+    title    = "ROS fold change (cytokine / Vehicle) per state",
+    subtitle = "Geometric mean with 95% CI; one-sample t-test on log(fc); BH-FDR across all tests; n=3",
+    x = NULL,
+    y = "Fold change (cytokine / Vehicle)"
+  ) +
+  theme(plot.title       = element_text(face = "bold", size = 12),
+        plot.subtitle    = element_text(size = 9, color = "grey40"),
+        axis.text.x      = element_text(angle = 20, hjust = 1, size = 8),
+        strip.background = element_rect(fill = "grey95"),
+        strip.text       = element_text(face = "bold"))
+
+p_C
+```
+
+```{r panel-D-ros-state-treatment, fig.width=14, fig.height=3}
+# Panel D: experiment-level median ROS by state within each treatment
+# No single-cell pseudoreplication:
+# 1) median per image within each state
+# 2) median across images within each experiment
+# 3) show experiment-level points
+
+ros_state_img <- ros_final %>%
+  group_by(Stimulus, Experiment, ImageNumber, State) %>%
+  summarise(median_ROS = median(ROS_intensity, na.rm = TRUE), .groups = "drop")
+
+ros_state_exp <- ros_state_img %>%
+  group_by(Stimulus, Experiment, State) %>%
+  summarise(median_ROS = median(median_ROS, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    Stimulus = factor(Stimulus, levels = TREATMENTS_6),
+    State = factor(State, levels = STATE_LEVELS)
+  )
+
+ros_state_summary <- ros_state_exp %>%
+  group_by(Stimulus, State) %>%
+  summarise(
+    group_median = median(median_ROS, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Stimulus = factor(Stimulus, levels = TREATMENTS_6),
+    State = factor(State, levels = STATE_LEVELS)
+  )
+
+p_D <- ggplot(ros_state_exp, aes(State, median_ROS, color = State)) +
+  geom_point(
+    aes(shape = Experiment),
+    size = 2.2,
+    position = position_jitter(width = 0.12, height = 0)
+  ) +
+ geom_crossbar(
+  data = ros_state_summary,
+  aes(x = State, y = group_median, ymin = group_median, ymax = group_median),
+  inherit.aes = FALSE,
+  width = 0.6,
+  color = "black",
+  linewidth = 0.35
+) +
+  facet_wrap(
+    ~ Stimulus, nrow = 1,
+    labeller = labeller(Stimulus = function(x)
+      parse(text = treatment_math_labels(x)))
+  ) +
+  scale_color_manual(values = STATE_COLORS, guide = "none") +
+  scale_shape_manual(values = c("Exp1" = 16, "Exp2" = 17, "Exp3" = 15)) +
+  theme_classic(base_size = 10) +
+  labs(
+    title = "ROS by morphological state within each treatment (24 hr)",
+    subtitle = "Points = independent experiments; horizontal line = group median",
+    x = NULL,
+    y = "Median CellROX intensity per experiment (A.U.)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+    strip.text = element_text(size = 9, face = "bold"),
+    strip.background = element_rect(fill = "grey95")
+  )
+
+p_D
+```
+
+```{r stat-tests}
+cat("\n============ Statistical Tests ============\n")
+
+ros_exp_state <- ros_final %>%
+  group_by(Experiment, State) %>%
+  summarise(median_ROS = median(ROS_intensity, na.rm = TRUE), .groups = "drop") %>%
+  complete(Experiment, State = STATE_LEVELS, fill = list(median_ROS = NA_real_))
+
+ros_exp_treat <- ros_final %>%
+  group_by(Experiment, Stimulus) %>%
+  summarise(median_ROS = median(ROS_intensity, na.rm = TRUE), .groups = "drop") %>%
+  complete(Experiment, Stimulus = TREATMENTS_6, fill = list(median_ROS = NA_real_))
+
+# Test 1: RM-ANOVA, State effect
+aov_state <- aov(median_ROS ~ State + Error(Experiment/State),
+                 data = ros_exp_state %>% drop_na(median_ROS))
+aov_summary <- summary(aov_state)
+aov_p <- tryCatch(aov_summary[[2]][[1]]["State", "Pr(>F)"],
+                  error = function(e) NA_real_)
+cat(sprintf("\n1. RM-ANOVA (ROS ~ State, n=3 experiments):\n"))
+cat(sprintf("   p = %.4f %s\n", aov_p, ifelse(aov_p < 0.05, "*", "ns")))
+
+# Test 2: Pairwise State comparisons
+state_pairs <- combn(STATE_LEVELS, 2, simplify = FALSE)
+state_pairwise <- lapply(state_pairs, function(pair) {
+  s1 <- ros_exp_state %>% filter(State == pair[1]) %>%
+    arrange(Experiment) %>% pull(median_ROS)
+  s2 <- ros_exp_state %>% filter(State == pair[2]) %>%
+    arrange(Experiment) %>% pull(median_ROS)
+  tt <- tryCatch(t.test(s1, s2, paired = TRUE), error = function(e) NULL)
+  tibble(State1 = pair[1], State2 = pair[2],
+         p.value = if (is.null(tt)) NA_real_ else tt$p.value)
+}) %>% bind_rows() %>%
+  mutate(FDR = p.adjust(p.value, method = "BH"))
+
+cat("\n2. Pairwise State comparisons (paired t-test, BH-FDR, n=3):\n")
+print(state_pairwise %>% mutate(across(where(is.numeric), ~ signif(., 3))))
+
+# Test 3: Treatment vs Vehicle
+veh_ros <- ros_exp_treat %>% filter(Stimulus == "Vehicle") %>%
+  arrange(Experiment) %>% pull(median_ROS)
+
+treat_stats <- lapply(setdiff(TREATMENTS_6, "Vehicle"), function(stim) {
+  trt <- ros_exp_treat %>% filter(Stimulus == stim) %>%
+    arrange(Experiment) %>% pull(median_ROS)
+  tt <- tryCatch(t.test(trt, veh_ros, paired = TRUE), error = function(e) NULL)
+  tibble(Stimulus = stim,
+         p.value  = if (is.null(tt)) NA_real_ else tt$p.value,
+         Delta    = median(trt, na.rm=TRUE) - median(veh_ros, na.rm=TRUE))
+}) %>% bind_rows() %>%
+  mutate(FDR = p.adjust(p.value, method = "BH"),
+         sig_mark = case_when(
+           is.na(FDR)  ~ "NA",
+           FDR < 0.001 ~ "***",
+           FDR < 0.01  ~ "**",
+           FDR < 0.05  ~ "*",
+           TRUE        ~ "ns"))
+
+cat("\n3. Treatment vs Vehicle (paired t-test, BH-FDR, n=3):\n")
+print(treat_stats %>% mutate(across(where(is.numeric), ~ signif(., 3))))
+
+# Test 4: Spread vs Small_Round per treatment
+ros_exp_state_treat <- ros_final %>%
+  group_by(Experiment, Stimulus, State) %>%
+  summarise(median_ROS = median(ROS_intensity, na.rm = TRUE), .groups = "drop") %>%
+  complete(Experiment, Stimulus = TREATMENTS_6, State = STATE_LEVELS,
+           fill = list(median_ROS = NA_real_))
+
+cat("\n4. Spread vs Small_Round per treatment (paired t-test, n=3):\n")
+for (stim in TREATMENTS_6) {
+  spread_exp <- ros_exp_state_treat %>%
+    filter(Stimulus == stim, State == "Spread") %>%
+    arrange(Experiment) %>% pull(median_ROS)
+  small_exp  <- ros_exp_state_treat %>%
+    filter(Stimulus == stim, State == "Small_Round") %>%
+    arrange(Experiment) %>% pull(median_ROS)
+  
+  if (sum(!is.na(spread_exp)) >= 3 && sum(!is.na(small_exp)) >= 3) {
+    tt <- tryCatch(t.test(spread_exp, small_exp, paired = TRUE),
+                   error = function(e) NULL)
+    if (!is.null(tt)) {
+      cat(sprintf("   %s: Delta=%.4f, p=%.3f %s\n",
+                  stim,
+                  median(spread_exp, na.rm=TRUE) - median(small_exp, na.rm=TRUE),
+                  tt$p.value,
+                  ifelse(tt$p.value < 0.001, "***",
+                         ifelse(tt$p.value < 0.01, "**",
+                                ifelse(tt$p.value < 0.05, "*", "ns")))))
+    } else {
+      cat(sprintf("   %s: t-test failed\n", stim))
+    }
+  } else {
+    cat(sprintf("   %s: insufficient data (n<3)\n", stim))
+  }
+}
+```
+
+```{r panel-E-correlation, fig.width=8, fig.height=6}
+# Panel E: one point = one experiment within one treatment
+# x = Spread-state fraction per (Stimulus, Experiment)
+# y = median ROS per (Stimulus, Experiment)
+
+spread_exp <- ros_final %>%
+  count(Stimulus, Experiment, State) %>%
+  group_by(Stimulus, Experiment) %>%
+  mutate(Fraction = n / sum(n)) %>%
+  ungroup() %>%
+  filter(State == "Spread") %>%
+  select(Stimulus, Experiment, Spread_fraction = Fraction)
+
+ros_exp <- ros_final %>%
+  group_by(Stimulus, Experiment, ImageNumber) %>%
+  summarise(median_ROS_img = median(ROS_intensity, na.rm = TRUE), .groups = "drop") %>%
+  group_by(Stimulus, Experiment) %>%
+  summarise(median_ROS = median(median_ROS_img, na.rm = TRUE), .groups = "drop")
+
+corr_df <- spread_exp %>%
+  left_join(ros_exp, by = c("Stimulus", "Experiment")) %>%
+  mutate(
+    Stimulus = factor(Stimulus, levels = TREATMENTS_6),
+    Experiment = factor(Experiment, levels = c("Exp1", "Exp2", "Exp3"))
+  )
+
+cor_result <- cor.test(
+  corr_df$Spread_fraction,
+  corr_df$median_ROS,
+  method = "spearman"
+)
+
+cat(sprintf("\n5. Spearman (Spread fraction vs median ROS, experiment-level):\n"))
+cat(sprintf("   rho = %.3f, p = %.3f\n",
+            cor_result$estimate, cor_result$p.value))
+
+label_df <- corr_df %>%
+  group_by(Stimulus) %>%
+  summarise(
+    Spread_fraction = median(Spread_fraction, na.rm = TRUE),
+    median_ROS = median(median_ROS, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(Label = case_when(
+    Stimulus == "IFNg"    ~ "IFNγ",
+    Stimulus == "IL1beta" ~ "IL-1β",
+    Stimulus == "TNFa"    ~ "TNFα",
+    Stimulus == "IL6"     ~ "IL-6",
+    Stimulus == "LPS"     ~ "LPS",
+    Stimulus == "Vehicle" ~ "Vehicle"
+  ))
+
+p_E <- ggplot(corr_df, aes(Spread_fraction, median_ROS)) +
+  geom_point(
+    aes(color = Stimulus, shape = Experiment),
+    size = 4.2, alpha = 0.9
+  ) +
+  ggrepel::geom_text_repel(
+    data = label_df,
+    aes(label = Label, color = Stimulus),
+    size = 5.5, show.legend = FALSE
+  ) +
+  scale_color_manual(
+    values = PAL_6,
+    name = "Treatment",
+    labels = c("Vehicle", "LPS", "IFNγ", "IL-1β", "IL-6", "TNFα")
+  ) +
+  scale_shape_manual(
+    values = c("Exp1" = 16, "Exp2" = 17, "Exp3" = 15),
+    name = "Experiment"
+  ) +
+  theme_classic(base_size = 15) +
+  labs(
+    title = "Morphological shift vs ROS production",
+    subtitle = sprintf(
+      "Each point = one treatment summary from one independent experiment\nSpearman rho = %.2f, p = %.3f",
+      cor_result$estimate, cor_result$p.value
+    ),
+    x = "Spread state fraction (per experiment)",
+    y = "Median CellROX intensity (per experiment, A.U.)"
+  )
+
+p_E
+```
+
+```{r save-panels}
+save_both <- function(plot, suffix, w, h) {
+  ggsave(paste0(FIG_PREFIX, "_", suffix, ".png"),
+         plot & transparent_theme,
+         width = w, height = h, dpi = 600, bg = "transparent")
+  ggsave(paste0(FIG_PREFIX, "_", suffix, ".pdf"),
+         plot & transparent_theme,
+         width = w, height = h, bg = "transparent")
+}
+
+save_both(p_B, "B_ros_per_treatment",    6,   3)
+save_both(p_C, "C_ros_foldchange_per_state", 12, 4)
+save_both(p_D, "D_ros_state_treatment", 14,   3)
+save_both(p_E, "E_correlation",          8,   6)
+
+write.csv(corr_df, paste0(FIG_PREFIX, "_correlation_data.csv"), row.names = FALSE)
+
+ros_summary <- ros_final %>%
+  group_by(Stimulus, State) %>%
+  summarise(n = n(),
+            mean_ROS   = mean(ROS_intensity, na.rm = TRUE),
+            median_ROS = median(ROS_intensity, na.rm = TRUE),
+            sd_ROS     = sd(ROS_intensity, na.rm = TRUE),
+            .groups = "drop")
+write.csv(ros_summary, paste0(FIG_PREFIX, "_ros_summary.csv"), row.names = FALSE)
+
+cat("\n============ Figure 6 complete ============\n")
+```
+
+
+
+

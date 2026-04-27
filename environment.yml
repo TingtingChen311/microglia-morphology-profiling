@@ -1,0 +1,29 @@
+# Conda environment for image preprocessing and Cellpose-SAM segmentation
+# Chen et al., "Single-cell, label-free morphology profiling of iPSC-derived microglia"
+#
+# Versions match those used in the published analysis (Hábrók HPC, University of Groningen).
+# Create with:
+#   conda env create -f environment.yml
+#   conda activate microglia-morph
+#
+# Note on PyTorch + CUDA:
+#   The pip install line below pulls a CUDA 12.1 build of PyTorch. If your
+#   GPU/driver requires a different CUDA version, replace `cu121` with the
+#   appropriate tag (e.g. `cu118`, `cu124`) — see https://pytorch.org/.
+#   For CPU-only execution, replace the URL with the default PyPI mirror.
+
+name: microglia-morph
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12.3
+  - pip
+  - numpy=2.2.6
+  - pillow=11.3.0
+  - pyyaml
+  - tifffile
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.5.1
+      - torchvision
+      - cellpose==4.0.6

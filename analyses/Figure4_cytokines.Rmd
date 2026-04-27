@@ -1,0 +1,740 @@
+---
+title: "Figure 4 — Image-level morphology analysis across 6 inflammatory stimuli"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = here::here())
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, cache = FALSE)
+
+OUT_DIR <- here::here("output")
+FIG_PREFIX <- file.path(OUT_DIR, "Figure4")
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+if (!interactive()) pdf(NULL)
+```
+
+```{r load-pipeline}
+if (!exists("scores_all") || !exists("dat_image")) {
+  source(here::here("R", "load_and_preprocess.R"))
+}
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(patchwork)
+  library(ggforce)
+  library(ggrepel)
+  library(ggpubr)
+  library(scales)
+})
+```
+
+```{r config}
+# -------- Figure 4 configuration --------
+TREATMENTS_6 <- c("Vehicle", "LPS", "IFNg", "IL1beta", "IL6", "TNFa")
+
+PAL_6 <- c(
+  "Vehicle" = "black",
+  "LPS"     = "#AB3A29",
+  "IFNg"    = "#D07F2C",
+  "IL1beta" = "#1E7C4A",
+  "IL6"     = "#6F6DA1",
+  "TNFa"    = "#6990A2"
+)
+
+# Greek-letter labels for plotmath
+treatment_math_labels <- function(x) {
+  x <- as.character(x)
+  x <- gsub("TNFa",    "TNF*alpha", x)
+  x <- gsub("IL1beta", "IL-1*beta", x)
+  x <- gsub("IFNg",    "IFN*gamma", x)
+  x
+}
+
+# Timepoints to display in main Figure 4
+TIMEPOINTS_8 <- c(0, 2, 4, 6, 8, 12, 16, 24)
+
+ELLIPSE_LEVEL <- 0.68  # matches old Rmd
+```
+
+```{r filter-figure4-subset}
+# Filter: IL34+, 6 treatments (exclude LPS+IFNg), all 13 timepoints
+f4_scores <- scores_all %>%
+  filter(
+    IL34 == "pos",
+    Stimulus %in% TREATMENTS_6
+  ) %>%
+  mutate(Stimulus = factor(Stimulus, levels = TREATMENTS_6))
+
+cat("Figure 4 image-level profiles used:", nrow(f4_scores), "\n")
+cat("Breakdown (Stimulus × Experiment):\n")
+print(table(f4_scores$Stimulus, f4_scores$Experiment))
+
+var_exp <- pca_model$sdev^2 / sum(pca_model$sdev^2)
+pc1_lab <- sprintf("PC1 (%.1f%%)", 100 * var_exp[1])
+pc2_lab <- sprintf("PC2 (%.1f%%)", 100 * var_exp[2])
+```
+
+```{r panel-A-helper}
+# Helper function: one PCA panel at one timepoint
+make_pca_panel <- function(df_t, t_label,
+                            show_axis_labels = TRUE,
+                            show_legend = FALSE) {
+  p <- ggplot(df_t, aes(PC1, PC2, color = Stimulus)) +
+    stat_ellipse(
+      aes(group = Stimulus),
+      level = ELLIPSE_LEVEL, type = "norm",
+      linetype = "dashed", linewidth = 0.7,
+      show.legend = FALSE
+    ) +
+    geom_point(size = 2.0, alpha = 0.85) +
+    scale_color_manual(
+      values = PAL_6,
+      labels = function(x) parse(text = treatment_math_labels(x)),
+      drop = FALSE
+    ) +
+    theme_classic(base_size = 11) +
+    labs(
+      title = paste0(t_label, " hr"),
+      x = if (show_axis_labels) pc1_lab else NULL,
+      y = if (show_axis_labels) pc2_lab else NULL
+    ) +
+    theme(
+      plot.title      = element_text(size = 12, face = "bold", hjust = 0.5),
+      axis.title      = element_text(size = 9),
+      axis.text       = element_text(size = 8),
+      legend.position = if (show_legend) "right" else "none"
+    )
+  p
+}
+```
+
+```{r panel-A-4timepoints}
+# Panel A variant 1: 4 representative timepoints (0, 2, 4, 24 hr)
+# Matches old Rmd's PCA_4_representative_timepoints
+
+rep_times <- c(0, 2, 4, 24)
+
+pca_list_rep <- lapply(rep_times, function(t) {
+  df_t <- f4_scores %>% filter(Time_hr == t)
+  make_pca_panel(df_t, t_label = as.character(t), show_legend = FALSE)
+})
+
+# Collect legend from a dummy plot with legend on
+dummy_for_legend <- make_pca_panel(
+  f4_scores %>% filter(Time_hr == 0),
+  t_label = "0", show_legend = TRUE
+) + theme(legend.position = "right",
+          legend.title = element_blank(),
+          legend.text = element_text(size = 10))
+
+p_A_rep <- wrap_plots(pca_list_rep, ncol = 4) +
+  plot_annotation(
+    title = "Morphology separation across 6 inflammatory stimuli",
+    subtitle = sprintf("PCA at representative timepoints (%d%% confidence ellipses)",
+                       round(ELLIPSE_LEVEL * 100))
+  ) &
+  theme(plot.title = element_text(face = "bold", size = 14, hjust = 0),
+        plot.subtitle = element_text(size = 11, color = "grey40", hjust = 0))
+
+# Append legend via cowplot-like trick: use guide_area
+# Simpler: wrap with a common legend
+p_A_rep <- wrap_plots(pca_list_rep, ncol = 4, guides = "collect") +
+  plot_annotation(
+    title = "Morphology separation across 6 inflammatory stimuli",
+    subtitle = sprintf("PCA at representative timepoints (%d%% confidence ellipses)",
+                       round(ELLIPSE_LEVEL * 100))
+  ) &
+  theme(
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 10),
+    plot.title    = element_text(face = "bold", size = 14, hjust = 0),
+    plot.subtitle = element_text(size = 11, color = "grey40", hjust = 0)
+  )
+
+# But with `guides="collect"` each sub-panel must have legend=on; fix:
+pca_list_rep_legend <- lapply(rep_times, function(t) {
+  df_t <- f4_scores %>% filter(Time_hr == t)
+  make_pca_panel(df_t, t_label = as.character(t), show_legend = TRUE)
+})
+p_A_rep <- wrap_plots(pca_list_rep_legend, ncol = 4, guides = "collect") +
+  plot_annotation(
+    title = "Morphology separation across 6 inflammatory stimuli",
+    subtitle = sprintf("PCA at representative timepoints (%d%% confidence ellipses)",
+                       round(ELLIPSE_LEVEL * 100))
+  ) &
+  theme(
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 10),
+    plot.title    = element_text(face = "bold", size = 14, hjust = 0),
+    plot.subtitle = element_text(size = 11, color = "grey40", hjust = 0)
+  )
+
+p_A_rep
+```
+
+```{r panel-A-2x4-grid}
+# Panel A variant 2: 2×4 grid showing 8 timepoints (0,2,4,6,8,12,16,24)
+
+pca_list_8 <- lapply(TIMEPOINTS_8, function(t) {
+  df_t <- f4_scores %>% filter(Time_hr == t)
+  make_pca_panel(df_t, t_label = as.character(t), show_legend = TRUE)
+})
+
+p_A_2x4 <- wrap_plots(pca_list_8, ncol = 4, guides = "collect") +
+  plot_annotation(
+    title = "PCA time course across 6 inflammatory stimuli",
+    subtitle = sprintf("%d%% confidence ellipses · %d independent experiments pooled",
+                       round(ELLIPSE_LEVEL * 100),
+                       length(unique(f4_scores$Experiment)))
+  ) &
+  theme(
+    legend.position = "right",
+    legend.title    = element_blank(),
+    legend.text     = element_text(size = 11),
+    plot.title      = element_text(face = "bold", size = 14, hjust = 0),
+    plot.subtitle   = element_text(size = 11, color = "grey40", hjust = 0)
+  )
+
+p_A_2x4
+```
+
+```{r save-panel-A}
+ggsave(paste0(FIG_PREFIX, "_A_pca_4representative.png"),
+       p_A_rep & transparent_theme,
+       width = 16, height = 4.5, dpi = 600, bg = "transparent")
+ggsave(paste0(FIG_PREFIX, "_A_pca_4representative.pdf"),
+       p_A_rep & transparent_theme,
+       width = 16, height = 4.5, bg = "transparent")
+
+ggsave(paste0(FIG_PREFIX, "_A_pca_2x4_timecourse.png"),
+       p_A_2x4 & transparent_theme,
+       width = 18, height = 9, dpi = 600, bg = "transparent")
+ggsave(paste0(FIG_PREFIX, "_A_pca_2x4_timecourse.pdf"),
+       p_A_2x4 & transparent_theme,
+       width = 18, height = 9, bg = "transparent")
+
+cat("\nSaved Figure 4 Panel A:\n")
+cat("  - Figure4_A_pca_4representative.{png,pdf}  (4 timepoints)\n")
+cat("  - Figure4_A_pca_2x4_timecourse.{png,pdf}  (8 timepoints, main panel)\n")
+```
+
+```{r panel-B-loadings-helper}
+# Feature name simplifier (matches old Rmd style)
+simplify_feature_names <- function(names) {
+  names <- gsub("AreaShape_",  "", names)
+  names <- gsub("Neighbors_",  "", names)
+  names <- gsub("Texture_",    "", names)
+  names <- gsub("_Adjacent",   "", names)
+  names <- gsub("NumberOfNeighbors", "N_Neighbors", names)
+  names <- gsub("PercentTouching",   "Pct_Touching", names)
+  names
+}
+
+# Feature category
+get_feature_category <- function(feature_names) {
+  dplyr::case_when(
+    grepl("^AreaShape_", feature_names) ~ "AreaShape",
+    grepl("^Texture_",   feature_names) ~ "Texture",
+    grepl("^Neighbors_", feature_names) ~ "Neighbors",
+    TRUE                                ~ "Other"
+  )
+}
+```
+
+```{r panel-B-feature-loadings-heatmap}
+# Extract PC1 and PC2 loadings for all final_features
+loadings_mat <- pca_model$rotation[final_features, 1:2, drop = FALSE]
+
+loadings_long <- as.data.frame(loadings_mat) %>%
+  tibble::rownames_to_column("Feature") %>%
+  tidyr::pivot_longer(-Feature, names_to = "PC", values_to = "Loading") %>%
+  mutate(
+    Feature_short = simplify_feature_names(Feature),
+    Category      = get_feature_category(Feature),
+    PC            = factor(PC, levels = c("PC1", "PC2"))
+  ) %>%
+  arrange(
+    factor(Category, levels = c("AreaShape", "Neighbors", "Texture", "Other")),
+    Feature_short
+  ) %>%
+  mutate(Feature_short = factor(Feature_short, levels = unique(Feature_short)))
+
+max_load <- max(abs(loadings_long$Loading), na.rm = TRUE)
+
+p_B_loadings <- ggplot(loadings_long,
+                       aes(x = Feature_short, y = PC, fill = Loading)) +
+  geom_tile(color = "white", linewidth = 0.8) +
+  geom_text(aes(label = sprintf("%.2f", Loading)),
+            size = 4, color = "white", fontface = "bold") +
+  scale_fill_gradient2(
+    low = "#2166ac", mid = "white", high = "#b2182b",
+    midpoint = 0, limits = c(-max_load, max_load),
+    name = "Loading"
+  ) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  coord_fixed(ratio = 1) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x  = element_text(size = 11, angle = 45, hjust = 1),
+    axis.text.y  = element_text(size = 12, face = "bold"),
+    axis.title   = element_blank(),
+    axis.line    = element_blank(),
+    axis.ticks   = element_blank(),
+    panel.grid   = element_blank(),
+    legend.title = element_text(size = 11, face = "bold"),
+    plot.title   = element_text(size = 13, face = "bold")
+  ) +
+  labs(title = "PCA feature loadings",
+       subtitle = "PC1 and PC2 contributions by feature")
+
+p_B_loadings
+
+cat("\nTop 3 features by |PC1 loading|:\n")
+print(loadings_long %>% filter(PC == "PC1") %>%
+        arrange(desc(abs(Loading))) %>% head(3) %>%
+        select(Feature, Loading))
+
+cat("\nTop 3 features by |PC2 loading|:\n")
+print(loadings_long %>% filter(PC == "PC2") %>%
+        arrange(desc(abs(Loading))) %>% head(3) %>%
+        select(Feature, Loading))
+```
+
+```{r save-panel-B}
+ggsave(paste0(FIG_PREFIX, "_B_feature_loadings.png"),
+       p_B_loadings & transparent_theme,
+       width = 8, height = 3.5, dpi = 600, bg = "transparent")
+ggsave(paste0(FIG_PREFIX, "_B_feature_loadings.pdf"),
+       p_B_loadings & transparent_theme,
+       width = 8, height = 3.5, bg = "transparent")
+
+cat("\nSaved Figure 4 Panel B: Figure4_B_feature_loadings.{png,pdf}\n")
+```
+
+```{r panel-CD-compute-cohens-d}
+# ============================================================
+# Per-experiment Cohen's D calculation
+# For each (Stimulus, Feature, Time_hr), compute Cohen's D vs Vehicle
+# within each experiment, then summarize across 3 experiments.
+# ============================================================
+
+# Preserve Panel B's feature ordering (category-based)
+# This matches the order in loadings_long computed in panel-B
+feature_order_panelB <- loadings_long %>%
+  filter(PC == "PC1") %>%
+  arrange(Feature_short) %>%
+  pull(Feature)
+
+# Confirm we have the 8 features
+stopifnot(length(feature_order_panelB) == 8)
+
+# Function: compute Cohen's D for one (Feature, Stimulus, Time_hr, Experiment)
+# using Vehicle in the SAME (Time_hr, Experiment) as reference
+compute_cohens_d <- function(vehicle_vals, target_vals) {
+  if (length(vehicle_vals) < 2 || length(target_vals) < 2) return(NA_real_)
+  
+  n1 <- length(vehicle_vals); n2 <- length(target_vals)
+  pooled_var <- ((n1 - 1) * var(vehicle_vals) + (n2 - 1) * var(target_vals)) /
+                (n1 + n2 - 2)
+  pooled_sd <- sqrt(pooled_var)
+  
+  if (is.na(pooled_sd) || pooled_sd == 0) return(NA_real_)
+  (mean(target_vals) - mean(vehicle_vals)) / pooled_sd
+}
+
+# Build long-form input
+f4_image_long <- dat_image %>%
+  filter(
+    IL34 == "pos",
+    Stimulus %in% TREATMENTS_6,
+    Time_hr %in% c(4, 24)
+  ) %>%
+  select(Experiment, Stimulus, Time_hr, all_of(feature_order_panelB)) %>%
+  pivot_longer(all_of(feature_order_panelB),
+               names_to = "Feature", values_to = "Value")
+
+# For each (Feature, Stimulus, Time_hr, Experiment) compute D vs Vehicle
+target_stimuli <- setdiff(TREATMENTS_6, "Vehicle")
+# Build a (Feature, Stimulus, Time_hr, Experiment) grid
+d_grid <- expand_grid(
+  feat    = feature_order_panelB,
+  stim    = target_stimuli,
+  t_hr    = c(4, 24),
+  exp_lab = c("Exp1", "Exp2", "Exp3")
+)
+
+# Compute D for each combination via pmap (no rowwise / no !!)
+d_per_experiment <- d_grid %>%
+  mutate(
+    D = pmap_dbl(list(feat, stim, t_hr, exp_lab),
+                 function(feat, stim, t_hr, exp_lab) {
+      veh <- f4_image_long %>%
+        filter(Feature == feat, Stimulus == "Vehicle",
+               Time_hr == t_hr, Experiment == exp_lab) %>%
+        pull(Value)
+      tgt <- f4_image_long %>%
+        filter(Feature == feat, Stimulus == stim,
+               Time_hr == t_hr, Experiment == exp_lab) %>%
+        pull(Value)
+      compute_cohens_d(veh, tgt)
+    })
+  ) %>%
+  rename(Feature    = feat,
+         Stimulus   = stim,
+         Time_hr    = t_hr,
+         Experiment = exp_lab)
+
+d_summary <- d_per_experiment %>%
+  group_by(Feature, Stimulus, Time_hr) %>%
+  summarise(
+    mean_D  = mean(D, na.rm = TRUE),
+    sd_D    = sd(D, na.rm = TRUE),
+    n_valid = sum(!is.na(D)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_value = pmap_dbl(list(Feature, Stimulus, Time_hr),
+      function(feat, stim, t_hr) {
+        d_vals <- d_per_experiment %>%
+          filter(Feature == feat, Stimulus == stim, Time_hr == t_hr) %>%
+          arrange(Experiment) %>%
+          pull(D)
+        if (sum(!is.na(d_vals)) < 3) return(NA_real_)
+        t.test(d_vals, mu = 0)$p.value  # one-sample t-test, H0: D = 0
+      }
+    )
+  ) %>%
+  mutate(
+    FDR = p.adjust(p_value, method = "BH"),
+    sig_mark = case_when(
+      FDR < 0.001 ~ "***",
+      FDR < 0.01  ~ "**",
+      FDR < 0.05  ~ "*",
+      TRUE        ~ ""
+    ),
+    # show numeric value in every cell; mark significant ones with an asterisk
+    cell_label = paste0(sprintf("%.1f", mean_D), sig_mark)
+  )
+
+# inspect output
+cat("\nSignificance distribution:\n")
+print(table(d_summary$sig_mark, d_summary$Time_hr))
+cat("\nSample rows with p values:\n")
+print(d_summary %>% select(Feature, Stimulus, Time_hr, mean_D, p_value, FDR, sig_mark) %>% head(10))
+```
+
+```{r panel-CD-heatmap-helper}
+# Helper to render one heatmap
+make_effect_heatmap <- function(df, time_label) {
+  df <- df %>%
+    mutate(
+      Feature_short = simplify_feature_names(Feature),
+      Feature_short = factor(Feature_short,
+                             levels = simplify_feature_names(feature_order_panelB)),
+      Stimulus = factor(Stimulus, levels = setdiff(TREATMENTS_6, "Vehicle"))
+    )
+  
+  max_abs <- max(abs(df$mean_D), na.rm = TRUE)
+  
+  ggplot(df, aes(x = Feature_short, y = Stimulus, fill = mean_D)) +
+    geom_tile(color = "white", linewidth = 0.7) +
+    geom_text(aes(label = cell_label),
+              size = 3.2, color = "black", fontface = "bold") +
+    scale_fill_gradient2(
+      low = "#2166ac", mid = "white", high = "#b2182b",
+      midpoint = 0, limits = c(-max_abs, max_abs),
+      name = "Cohen's D\n(mean, n=3)"
+    ) +
+    scale_x_discrete(expand = c(0, 0)) +
+    scale_y_discrete(
+      labels = function(x) parse(text = treatment_math_labels(x)),
+      expand = c(0, 0)
+    ) +
+    coord_fixed(ratio = 1) +
+    theme_classic(base_size = 12) +
+    theme(
+      axis.text.x     = element_text(size = 10, angle = 45, hjust = 1),
+      axis.text.y     = element_text(size = 11, face = "bold"),
+      axis.title      = element_blank(),
+      axis.line       = element_blank(),
+      axis.ticks      = element_blank(),
+      panel.grid      = element_blank(),
+      legend.title    = element_text(size = 10, face = "bold"),
+      legend.text     = element_text(size = 9),
+      plot.title      = element_text(size = 13, face = "bold"),
+      plot.subtitle   = element_text(size = 10, color = "grey40")
+    ) +
+    labs(
+      title    = paste0("Treatment effects at ", time_label, " hr"),
+      subtitle = "Cohen's D vs Vehicle (per-experiment mean, n=3)"
+    )
+}
+```
+
+```{r panel-C-heatmap-4h, fig.width=7, fig.height=6}
+p_C_4h <- make_effect_heatmap(
+  d_summary %>% filter(Time_hr == 4),
+  time_label = "4"
+)
+p_C_4h
+```
+
+```{r panel-D-heatmap-24h, fig.width=7, fig.height=6}
+p_D_24h <- make_effect_heatmap(
+  d_summary %>% filter(Time_hr == 24),
+  time_label = "24"
+)
+p_D_24h
+```
+
+```{r save-panels-CD}
+ggsave(paste0(FIG_PREFIX, "_C_cohens_d_4h.png"),
+       p_C_4h & transparent_theme,
+       width = 9, height = 3.5, dpi = 600, bg = "transparent")
+ggsave(paste0(FIG_PREFIX, "_C_cohens_d_4h.pdf"),
+       p_C_4h & transparent_theme,
+       width = 9, height = 3.5, bg = "transparent")
+
+ggsave(paste0(FIG_PREFIX, "_D_cohens_d_24h.png"),
+       p_D_24h & transparent_theme,
+       width = 9, height = 3.5, dpi = 600, bg = "transparent")
+ggsave(paste0(FIG_PREFIX, "_D_cohens_d_24h.pdf"),
+       p_D_24h & transparent_theme,
+       width = 9, height = 3.5, bg = "transparent")
+
+cat("\nSaved Figure 4 Panels C/D:\n")
+cat("  - Figure4_C_cohens_d_4h.{png,pdf}\n")
+cat("  - Figure4_D_cohens_d_24h.{png,pdf}\n")
+cat("  - Figure4_cohens_d_summary.csv (for supplementary)\n")
+cat("  - Figure4_cohens_d_per_experiment.csv (raw per-experiment D values)\n")
+```
+```{r panel-EF-violin-helper}
+suppressPackageStartupMessages({
+  library(lmerTest)   # lmer with p-values
+  library(emmeans)    # contrasts
+  library(broom.mixed)
+})
+
+# The 4 features to show, in a fixed display order
+VIOLIN_FEATURES <- c(
+  "AreaShape_Eccentricity",
+  "AreaShape_Area",
+  "AreaShape_FormFactor",
+  "Neighbors_PercentTouching_Adjacent"
+)
+
+violin_feature_labels <- c(
+  "AreaShape_Eccentricity"              = "Eccentricity",
+  "AreaShape_Area"                      = "Area (log, centered)",
+  "AreaShape_FormFactor"                = "FormFactor",
+  "Neighbors_PercentTouching_Adjacent"  = "Pct Touching (log, centered)"
+)
+
+# Per-feature y-axis labels (not all features are centered)
+violin_feature_ylabs <- c(
+  "AreaShape_Eccentricity"              = "Eccentricity",
+  "AreaShape_Area"                      = "Area (log, centered)",
+  "AreaShape_FormFactor"                = "FormFactor",
+  "Neighbors_PercentTouching_Adjacent"  = "Pct Touching (log, centered)"
+)
+
+# -----------------------------------------------------------
+# Helper: fit mixed model + return contrasts vs Vehicle
+# Model: value ~ Stimulus + (1 | Experiment/Well)
+#   - Experiment random intercept:   batch variation (n=3)
+#   - Well nested in Experiment:      biological replicate variation (3 wells)
+#   - Residual:                       image-level technical variation (2 images/well)
+# Inference uses well-level df via Kenward-Roger approximation.
+# Contrasts: Dunnett-adjusted vs Vehicle.
+# -----------------------------------------------------------
+fit_mixed_contrasts <- function(df_image) {
+  df_image <- df_image %>%
+    mutate(
+      Stimulus   = factor(Stimulus, levels = TREATMENTS_6),
+      Experiment = factor(Experiment),
+      Well       = factor(Well)
+    )
+  
+  m <- tryCatch(
+    lmerTest::lmer(value ~ Stimulus + (1 | Experiment/Well),
+                   data = df_image, REML = TRUE),
+    error = function(e) NULL
+  )
+  
+  # Fallback chain: nested → experiment-only → lm
+  if (is.null(m) || isSingular(m, tol = 1e-5)) {
+    m <- tryCatch(
+      lmerTest::lmer(value ~ Stimulus + (1 | Experiment),
+                     data = df_image, REML = TRUE),
+      error = function(e) NULL
+    )
+  }
+  if (is.null(m) || (inherits(m, "lmerMod") && isSingular(m, tol = 1e-5))) {
+    m <- lm(value ~ Stimulus + Experiment, data = df_image)
+    emm <- emmeans::emmeans(m, ~ Stimulus)
+  } else {
+    emm <- emmeans::emmeans(m, ~ Stimulus, lmer.df = "kenward-roger")
+  }
+  
+  ct <- emmeans::contrast(emm, method = "trt.vs.ctrl", ref = 1,
+                          adjust = "dunnettx")
+  
+  ct_df <- as.data.frame(ct)
+  t_col <- if ("t.ratio" %in% names(ct_df)) "t.ratio" else "statistic"
+  
+  ct_df %>%
+    transmute(
+      Stimulus = gsub(" - Vehicle$", "", as.character(contrast)),
+      estimate, SE,
+      t_ratio = .data[[t_col]],
+      p.value
+    ) %>%
+    mutate(
+      sig_mark = case_when(
+        p.value < 0.001 ~ "***",
+        p.value < 0.01  ~ "**",
+        p.value < 0.05  ~ "*",
+        TRUE            ~ "ns"
+      )
+    )
+}
+
+make_violin_panel <- function(feat, t_hr,
+                               data = dat_image,
+                               show_x_labels = TRUE,
+                               show_ns = TRUE) {
+  
+  # ── Image-level data for plotting ────────────────────────
+  df <- data %>%
+    filter(IL34 == "pos", Stimulus %in% TREATMENTS_6, Time_hr == t_hr) %>%
+    mutate(Stimulus = factor(Stimulus, levels = TREATMENTS_6)) %>%
+    select(Stimulus, Experiment, Well, value = all_of(feat))
+  
+  # ── Mixed-model contrasts vs Vehicle ─────────────────────
+  pval_df <- fit_mixed_contrasts(df)
+  
+  # ── y-axis positioning ───────────────────────────────────
+  y_range  <- range(df$value, na.rm = TRUE)
+  y_span   <- diff(y_range)
+  y_top    <- y_range[2] + y_span * 0.4
+  y_bottom <- y_range[1] - y_span * 0.05
+  star_y   <- y_range[2] + y_span * 0.35
+  
+  # ── Build annotation data ────────────────────────────────
+  star_df <- pval_df %>%
+    { if (show_ns) . else filter(., sig_mark != "ns") } %>%
+    mutate(x_pos = match(Stimulus, levels(df$Stimulus)))
+  
+  # ── Base plot ────────────────────────────────────────────
+  p <- ggplot(df, aes(x = Stimulus, y = value, fill = Stimulus)) +
+    geom_violin(width = 0.75, alpha = 0.65, trim = FALSE, scale = "width",
+                linewidth = 0.3) +
+    geom_jitter(aes(shape = Experiment),
+                width = 0.12, alpha = 0.85, size = 1.4,
+                color = "black", stroke = 0.25) +
+    scale_fill_manual(values = PAL_6, guide = "none") +
+    scale_shape_manual(values = c("Exp1" = 16, "Exp2" = 17, "Exp3" = 15),
+                       name = "Experiment") +
+    scale_x_discrete(
+      labels = function(x) parse(text = treatment_math_labels(x))
+    ) +
+    coord_cartesian(ylim = c(y_bottom, y_top), clip = "off") +
+    theme_classic(base_size = 12) +
+    labs(
+      title    = violin_feature_labels[feat],
+      subtitle = paste0(t_hr, " hr · LMM (nested) vs Vehicle (Dunnett)"),
+      x        = NULL,
+      y        = violin_feature_ylabs[feat]
+    ) +
+    theme(
+      plot.title      = element_text(size = 12, face = "bold", hjust = 0.5),
+      plot.subtitle   = element_text(size = 10, color = "grey40", hjust = 0.5),
+      axis.text.x     = if (show_x_labels)
+                          element_text(size = 10) else element_blank(),
+      axis.ticks.x    = if (show_x_labels) element_line() else element_blank(),
+      axis.text.y     = element_text(size = 9),
+      axis.title.y    = element_text(size = 10),
+      legend.position = "none",
+      plot.margin     = margin(8, 8, 8, 8)
+    )
+  
+  # ── Add significance annotations only if there are any ───
+  if (nrow(star_df) > 0) {
+    p <- p + annotate("text",
+      x        = star_df$x_pos,
+      y        = star_y,
+      label    = star_df$sig_mark,
+      size     = ifelse(star_df$sig_mark == "ns", 3.2, 5),
+      fontface = ifelse(star_df$sig_mark == "ns", "plain", "bold"),
+      color    = ifelse(star_df$sig_mark == "ns", "grey50", "black")
+    )
+  }
+  
+  p
+}
+```
+
+```{r panel-E-violin-4h, fig.width=10, fig.height=8}
+violins_4h <- lapply(VIOLIN_FEATURES, function(feat) {
+  make_violin_panel(feat, t_hr = 4)
+})
+
+p_E_4h <- wrap_plots(violins_4h, ncol = 2) +
+  plot_annotation(
+    title    = "Morphology feature distributions at 4 hr",
+    subtitle = "Image-level profiles; LMM with Experiment/Well nested random effects, Dunnett-adjusted vs Vehicle; shapes = experiment"
+  ) &
+  theme(
+    plot.title    = element_text(face = "bold", size = 14, hjust = 0),
+    plot.subtitle = element_text(size = 11, color = "grey40", hjust = 0)
+  )
+
+p_E_4h
+```
+
+```{r panel-F-violin-24h, fig.width=10, fig.height=8}
+violins_24h <- lapply(VIOLIN_FEATURES, function(feat) {
+  make_violin_panel(feat, t_hr = 24)
+})
+
+p_F_24h <- wrap_plots(violins_24h, ncol = 2) +
+  plot_annotation(
+    title    = "Morphology feature distributions at 24 hr",
+    subtitle = "Image-level profiles; LMM with Experiment/Well nested random effects, Dunnett-adjusted vs Vehicle; shapes = experiment"
+  ) &
+  theme(
+    plot.title    = element_text(face = "bold", size = 14, hjust = 0),
+    plot.subtitle = element_text(size = 11, color = "grey40", hjust = 0)
+  )
+
+p_F_24h
+```
+
+```{r save-panels-EF}
+ggsave(paste0(FIG_PREFIX, "_E_violins_4h.png"),
+       p_E_4h & transparent_theme,
+       width = 10, height = 4, dpi = 600, bg = "transparent")
+ggsave(paste0(FIG_PREFIX, "_E_violins_4h.pdf"),
+       p_E_4h & transparent_theme,
+       width = 10, height = 4, bg = "transparent")
+
+ggsave(paste0(FIG_PREFIX, "_F_violins_24h.png"),
+       p_F_24h & transparent_theme,
+       width = 10, height = 4, dpi = 600, bg = "transparent")
+ggsave(paste0(FIG_PREFIX, "_F_violins_24h.pdf"),
+       p_F_24h & transparent_theme,
+       width = 10, height = 4, bg = "transparent")
+
+cat("\nSaved Figure 4 Panels E/F:\n")
+cat("  - Figure4_E_violins_4h.{png,pdf}\n")
+cat("  - Figure4_F_violins_24h.{png,pdf}\n")
+```
+
+
+
+
+

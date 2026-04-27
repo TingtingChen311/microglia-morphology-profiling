@@ -1,0 +1,662 @@
+---
+title: "Figure 5 — Single-cell morphology states across 6 inflammatory stimuli"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = here::here())
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, cache = FALSE)
+
+OUT_DIR <- here::here("output")
+FIG_PREFIX  <- file.path(OUT_DIR, "Figure5")
+ANCHOR_FILE <- here::here("R", "state_anchors.rds")
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+if (!interactive()) pdf(NULL)
+```
+
+```{r load-pipeline}
+if (!exists("scores_all") || !exists("prepare_singlecell") ||
+    !exists("assign_cells_to_nearest_anchor")) {
+  source(here::here("R", "load_and_preprocess.R"))
+}
+
+stopifnot(file.exists(ANCHOR_FILE))
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(patchwork)
+  library(uwot)
+})
+# Note: MASS::kde2d is called with full prefix to avoid masking dplyr::select
+
+anchor_bundle <- readRDS(ANCHOR_FILE)
+state_anchors <- anchor_bundle$anchors
+state_scaling <- anchor_bundle$scaling
+
+cat("Loaded anchors:\n");  print(state_anchors)
+cat("\nLoaded scaling:\n"); print(state_scaling)
+```
+
+```{r config}
+TREATMENTS_6 <- c("Vehicle", "LPS", "IFNg", "IL1beta", "IL6", "TNFa")
+
+PAL_6 <- c(
+  "Vehicle" = "black",
+  "LPS"     = "#AB3A29",
+  "IFNg"    = "#D07F2C",
+  "IL1beta" = "#1E7C4A",
+  "IL6"     = "#6F6DA1",
+  "TNFa"    = "#6990A2"
+)
+
+STATE_COLORS <- c(
+  "Elongated"   = "#FF85C0",
+  "Spread"      = "#00CED1",
+  "Ramified"    = "#FFD700",
+  "Small_Round" = "#8B4513"
+)
+STATE_LEVELS <- c("Elongated","Spread","Ramified","Small_Round")
+
+treatment_math_labels <- function(x) {
+  x <- as.character(x)
+  x <- gsub("TNFa",    "TNF*alpha", x)
+  x <- gsub("IL1beta", "IL-1*beta", x)
+  x <- gsub("IFNg",    "IFN*gamma", x)
+  x
+}
+
+treatment_facet_labels <- c(
+  "Vehicle" = "Vehicle",
+  "LPS"     = "LPS",
+  "IFNg"    = "IFNγ",
+  "IL1beta" = "IL-1β",
+  "IL6"     = "IL6",
+  "TNFa"    = "TNFα"
+)
+
+# Transparent background theme
+transparent_theme <- theme(
+  plot.background       = element_rect(fill = "transparent", colour = NA),
+  panel.background      = element_rect(fill = "transparent", colour = NA),
+  legend.background     = element_rect(fill = "transparent", colour = NA),
+  legend.box.background = element_rect(fill = "transparent", colour = NA),
+  legend.key            = element_rect(fill = "transparent", colour = NA)
+)
+```
+
+```{r set-target-times}
+# Pre-specified time points (defined in R/load_and_preprocess.R).
+# Single-cell state fractions across all 13 acquired time points are shown in
+# Supplementary Figure FigureS_timecourse (Fig5 context panel).
+TARGET_TIMES <- SC_TIMEPOINTS  # c(4, 24)
+cat("Figure 5 single-cell analyses will use:",
+    paste(TARGET_TIMES, "h", collapse = ", "), "\n")
+```
+
+```{r prepare-singlecell}
+# Run prepare_singlecell for each pre-specified time point.
+sc_bundles <- lapply(TARGET_TIMES, function(t) {
+  cat(sprintf("\n--- Preparing single-cell data for t = %d h ---\n", t))
+  prepare_singlecell(
+    cp              = cp_all,
+    meta            = meta_all,
+    stimuli         = TREATMENTS_6,
+    il34            = "pos",
+    target_time     = t,
+    cells_per_group = 1667,
+    seed            = 123
+  )
+})
+names(sc_bundles) <- paste0("t", TARGET_TIMES)
+
+for (nm in names(sc_bundles)) {
+  b <- sc_bundles[[nm]]
+  cat(sprintf("[%s] sc_raw = %d | sc_ds = %d\n",
+              nm, nrow(b$sc_raw), nrow(b$sc_ds)))
+}
+```
+
+```{r assign-states}
+# Apply frozen anchor scaling + nearest-anchor assignment at each time point.
+
+sc_raw_list <- list()
+sc_ds_list  <- list()
+
+for (nm in names(sc_bundles)) {
+  sc_raw_t <- sc_bundles[[nm]]$sc_raw %>% add_morphology_axes(scaling = state_scaling)
+  sc_ds_t  <- sc_bundles[[nm]]$sc_ds  %>% add_morphology_axes(scaling = state_scaling)
+  
+  state_axes <- c("z_elong", "z_size", "z_round")
+  sc_raw_t <- sc_raw_t[complete.cases(sc_raw_t[, state_axes]), ]
+  sc_ds_t  <- sc_ds_t[ complete.cases(sc_ds_t[,  state_axes]), ]
+  
+  sc_raw_t$State_final <- factor(
+    assign_cells_to_nearest_anchor(sc_raw_t, state_anchors),
+    levels = STATE_LEVELS)
+  sc_ds_t$State_final  <- factor(
+    assign_cells_to_nearest_anchor(sc_ds_t,  state_anchors),
+    levels = STATE_LEVELS)
+  
+  sc_raw_t$Stimulus <- factor(sc_raw_t$Stimulus, levels = TREATMENTS_6)
+  sc_ds_t$Stimulus  <- factor(sc_ds_t$Stimulus,  levels = TREATMENTS_6)
+  sc_raw_t$Time_hr  <- as.numeric(gsub("t", "", nm))
+  sc_ds_t$Time_hr   <- as.numeric(gsub("t", "", nm))
+  
+  sc_raw_list[[nm]] <- sc_raw_t
+  sc_ds_list[[nm]]  <- sc_ds_t
+  
+  cat(sprintf("\n[%s] State x Treatment (sc_raw, for stats):\n", nm))
+  print(table(sc_raw_t$State_final, sc_raw_t$Stimulus))
+}
+
+# Pool for convenience (stats chunk uses this)
+sc_raw_all <- bind_rows(sc_raw_list, .id = "time_key")
+sc_ds_all  <- bind_rows(sc_ds_list,  .id = "time_key")
+```
+
+```{r umap-embedding}
+# Compute UMAP per time point. Mahalanobis outlier filter BEFORE UMAP
+# on centered feature space (not UMAP coords).
+
+plot_df_list <- list()
+
+for (nm in names(sc_ds_list)) {
+  sc_ds_t <- sc_ds_list[[nm]]
+  
+  # NOTE: No outlier filtering. UMAP is for visualization only; all
+  # statistical analyses use the complete sc_raw data. Previous Mahalanobis-
+  # based filtering was removed because CellProfiler morphology features
+  # are not multivariate normal, so the chi-square critical value does not
+  # correspond to its nominal quantile, and removal rates differed between
+  # stimuli (e.g., IFNγ 1.8% vs Vehicle 3.2%), potentially introducing
+  # stimulus-specific visualization bias.
+  
+  X_sc    <- sc_ds_t %>% dplyr::select(all_of(final_features)) %>% scale()
+  pca_sc  <- prcomp(X_sc, center = FALSE, scale. = FALSE)
+  var_cum <- cumsum(pca_sc$sdev^2 / sum(pca_sc$sdev^2))
+  n_pcs   <- which(var_cum >= 0.95)[1]
+  cat(sprintf("[%s] UMAP input: %d cells, %d PCs (%.1f%% variance)\n",
+              nm, nrow(sc_ds_t), n_pcs, 100 * var_cum[n_pcs]))
+  
+  set.seed(123)
+  umap_emb <- uwot::umap(
+    pca_sc$x[, 1:n_pcs, drop = FALSE],
+    n_neighbors = 50, min_dist = 0.5, metric = "euclidean", verbose = FALSE
+  )
+  
+  plot_df_list[[nm]] <- sc_ds_t %>%
+    mutate(UMAP1 = umap_emb[, 1], UMAP2 = umap_emb[, 2])
+}
+umap_limits <- lapply(plot_df_list, function(pdf) {
+  xr <- quantile(pdf$UMAP1, c(0.0005, 0.9995), na.rm = TRUE)
+  yr <- quantile(pdf$UMAP2, c(0.0005, 0.9995), na.rm = TRUE)
+  pad_x <- diff(xr) * 0.03
+  pad_y <- diff(yr) * 0.03
+  list(
+    xr = c(xr[1] - pad_x, xr[2] + pad_x),
+    yr = c(yr[1] - pad_y, yr[2] + pad_y)
+  )
+})
+
+cat("\n--- plot_df_list ready ---\n")
+sapply(plot_df_list, nrow)
+```
+
+```{r panel-helpers}
+make_umap_state <- function(pdf, t_label, xr, yr) {
+  ggplot(pdf, aes(UMAP1, UMAP2, color = State_final)) +
+    geom_point(size = 0.35, alpha = 0.45) +
+    scale_color_manual(values = STATE_COLORS, name = "State") +
+    guides(color = guide_legend(override.aes = list(size = 6, alpha = 1))) +
+    coord_fixed(xlim = xr, ylim = yr, expand = FALSE) +
+    theme_classic(base_size = 16) +
+    labs(title = sprintf("%s hr: 4 morphology states", t_label),
+         x = "UMAP 1", y = "UMAP 2") +
+    theme(plot.title = element_text(face = "bold", size = 14))
+}
+
+make_umap_treatment <- function(pdf, t_label, xr, yr) {
+  ggplot(pdf, aes(UMAP1, UMAP2, color = Stimulus)) +
+    geom_point(size = 0.35, alpha = 0.45) +
+    scale_color_manual(values = PAL_6,
+                       labels = function(x) parse(text = treatment_math_labels(x)),
+                       name = "Stimulus") +
+    guides(color = guide_legend(override.aes = list(size = 4, alpha = 1))) +
+    coord_fixed(xlim = xr, ylim = yr, expand = FALSE) +
+    theme_classic(base_size = 12) +
+    labs(title = sprintf("%s hr: treatments", t_label),
+         x = "UMAP 1", y = "UMAP 2") +
+    theme(plot.title = element_text(face = "bold", size = 12))
+}
+
+make_umap_density <- function(pdf, t_label, xr, yr) {
+  density_list <- lapply(levels(pdf$Stimulus), function(stim) {
+    sub <- pdf %>% filter(Stimulus == stim)
+    if (nrow(sub) < 10) return(NULL)
+    d <- MASS::kde2d(sub$UMAP1, sub$UMAP2, n = 300,
+                     lims = c(xr[1], xr[2], yr[1], yr[2]))
+    expand.grid(UMAP1 = d$x, UMAP2 = d$y) %>%
+      mutate(density = as.vector(d$z),
+             ndensity = density / max(density),
+             Stimulus = stim)
+  })
+  density_df <- bind_rows(density_list) %>%
+    mutate(Stimulus = factor(Stimulus, levels = levels(pdf$Stimulus)),
+           density_bin = cut(ndensity, breaks = seq(0, 1, by = 0.125),
+                             include.lowest = TRUE))
+
+  ggplot(density_df, aes(UMAP1, UMAP2, fill = density_bin)) +
+    geom_raster() +
+    facet_wrap(~ Stimulus, ncol = 3,
+               labeller = labeller(Stimulus = treatment_facet_labels)) +
+    scale_fill_viridis_d(option = "viridis", name = "Density",
+                         direction = 1, na.value = "black") +
+    coord_fixed(xlim = xr, ylim = yr, expand = FALSE) +
+    theme_classic(base_size = 20) +
+    labs(title = sprintf("%s hr: morphology density", t_label),
+         x = "UMAP 1", y = "UMAP 2") +
+    theme(plot.title       = element_text(face = "bold", size = 20),
+          strip.background = element_rect(fill = "grey95", color = "black",
+                                          linewidth = 0.4),
+          strip.text       = element_text(size = 18, face = "bold"),
+          panel.spacing    = unit(0.2, "lines"),
+          legend.position  = "right")
+}
+
+
+make_state_composition <- function(pdf, t_label) {
+  pdf %>%
+    count(Stimulus, State_final) %>%
+    group_by(Stimulus) %>% mutate(Fraction = n / sum(n)) %>% ungroup() %>%
+    ggplot(aes(Stimulus, Fraction, fill = State_final)) +
+    geom_col(position = "fill", width = 0.75) +
+    scale_fill_manual(values = STATE_COLORS, name = "State") +
+    scale_x_discrete(labels = function(x) parse(text = treatment_math_labels(x))) +
+    theme_classic(base_size = 12) +
+    labs(title = sprintf("%s hr: state composition", t_label),
+         x = NULL, y = "Fraction of cells") +
+    theme(plot.title  = element_text(face = "bold", size = 12),
+          axis.text.x = element_text(size = 10))
+}
+
+make_treatment_composition <- function(pdf, t_label) {
+  pdf %>%
+    count(State_final, Stimulus) %>%
+    group_by(State_final) %>% mutate(Fraction = n / sum(n)) %>% ungroup() %>%
+    ggplot(aes(State_final, Fraction, fill = Stimulus)) +
+    geom_col(position = "fill", width = 0.75) +
+    scale_fill_manual(values = PAL_6,
+                      labels = function(x) parse(text = treatment_math_labels(x))) +
+    theme_classic(base_size = 12) +
+    labs(title = sprintf("%s hr: treatment composition per state", t_label),
+         x = NULL, y = "Fraction of cells") +
+    theme(plot.title  = element_text(face = "bold", size = 12),
+          axis.text.x = element_text(size = 10, angle = 15, hjust = 1))
+}
+```
+
+```{r generate-all-panels}
+panels <- lapply(names(plot_df_list), function(nm) {
+  pdf <- plot_df_list[[nm]]
+  lims <- umap_limits[[nm]]
+  t_label <- gsub("t", "", nm)
+  list(
+    A = make_umap_state    (pdf, t_label, lims$xr, lims$yr),
+    B = make_umap_treatment(pdf, t_label, lims$xr, lims$yr),
+    C = make_umap_density  (pdf, t_label, lims$xr, lims$yr),
+    D = make_state_composition(pdf, t_label),
+    E = make_treatment_composition(pdf, t_label)
+  )
+})
+names(panels) <- names(plot_df_list)  
+```
+
+```{r panel-G-enrichment-stats}
+# Use sc_raw_all (full data, both time points).
+# Image → Experiment → paired t-test. BH-FDR across all tests.
+
+target_stimuli <- setdiff(TREATMENTS_6, "Vehicle")
+
+state_frac_image <- sc_raw_all %>%
+  count(Time_hr, ImageNumber, Experiment, Stimulus, State_final) %>%
+  complete(
+    nesting(Time_hr, ImageNumber, Experiment, Stimulus),
+    State_final = STATE_LEVELS,
+    fill = list(n = 0)
+  ) %>%
+  group_by(Time_hr, ImageNumber, Experiment, Stimulus) %>%
+  mutate(Fraction = n / sum(n)) %>%
+  ungroup()
+
+state_frac_exp <- state_frac_image %>%
+  group_by(Time_hr, Experiment, Stimulus, State_final) %>%
+  summarise(Fraction = mean(Fraction), .groups = "drop") %>%
+  complete(
+    Time_hr, Experiment, Stimulus, State_final,
+    fill = list(Fraction = 0)
+  )
+
+# NOTE: removed the duplicated `state_frac_exp <- ...` assignment from the
+# original chunk that had silently dropped the `complete()` result.
+
+# Paired t-test per (state, stimulus, time)
+enrichment_df <- expand_grid(
+  Time_hr  = TARGET_TIMES,
+  State    = STATE_LEVELS,
+  Stimulus = target_stimuli
+) %>%
+  pmap_dfr(function(Time_hr, State, Stimulus) {
+    veh <- state_frac_exp %>%
+      filter(Time_hr == !!Time_hr, State_final == State,
+             Stimulus == "Vehicle") %>%
+      arrange(Experiment) %>% pull(Fraction)
+    trt <- state_frac_exp %>%
+      filter(Time_hr == !!Time_hr, State_final == State,
+             Stimulus == !!Stimulus) %>%
+      arrange(Experiment) %>% pull(Fraction)
+    
+    if (length(veh) < 3 || length(trt) < 3) {
+      return(tibble(Time_hr = Time_hr, State = State, Stimulus = Stimulus,
+                    Veh_mean = NA, Stim_mean = NA, Delta = NA,
+                    Pvalue = NA, CI_lower = NA, CI_upper = NA))
+    }
+    
+    tt <- tryCatch(t.test(trt, veh, paired = TRUE), error = function(e) NULL)
+    if (is.null(tt)) {
+      return(tibble(Time_hr = Time_hr, State = State, Stimulus = Stimulus,
+                    Veh_mean = mean(veh), Stim_mean = mean(trt),
+                    Delta = mean(trt) - mean(veh),
+                    Pvalue = NA, CI_lower = NA, CI_upper = NA))
+    }
+    
+    tibble(Time_hr = Time_hr, State = State, Stimulus = Stimulus,
+           Veh_mean  = mean(veh), Stim_mean = mean(trt),
+           Delta     = mean(trt) - mean(veh),
+           Pvalue    = tt$p.value,
+           CI_lower  = tt$conf.int[1], CI_upper  = tt$conf.int[2])
+  }) %>%
+  group_by(Time_hr) %>%
+  mutate(FDR = p.adjust(Pvalue, method = "BH")) %>%
+  ungroup() %>%
+  arrange(Time_hr, State, Stimulus)
+
+cat("\n--- State enrichment, both time points (BH-FDR across all tests) ---\n")
+print(enrichment_df %>% mutate(across(where(is.numeric), ~ signif(., 3))))
+
+write.csv(enrichment_df,
+          paste0(FIG_PREFIX, "_state_enrichment_stats.csv"), row.names = FALSE)
+write.csv(state_frac_exp,
+          paste0(FIG_PREFIX, "_state_fraction_per_experiment.csv"), row.names = FALSE)
+
+# Build one heatmap per time point
+make_enrichment_heatmap <- function(df, t_label) {
+  df <- df %>%
+    mutate(Stimulus = factor(Stimulus, levels = target_stimuli),
+           State    = factor(State,    levels = STATE_LEVELS),
+           sig_mark = case_when(is.na(FDR) ~ "",
+                                FDR < 0.001 ~ "***",
+                                FDR < 0.01  ~ "**",
+                                FDR < 0.05  ~ "*",
+                                TRUE        ~ ""),
+           cell_label = ifelse(!is.na(Delta) & abs(Delta) > 0.005,
+                               sprintf("%.2f%s", Delta, sig_mark), sig_mark))
+  
+  max_abs <- max(abs(df$Delta), na.rm = TRUE)
+  
+  ggplot(df, aes(Stimulus, State, fill = Delta)) +
+    geom_tile(color = "white", linewidth = 0.8) +
+    geom_text(aes(label = cell_label), size = 3.2,
+              color = "black", fontface = "bold") +
+    scale_fill_gradient2(
+      low = "#2166ac", mid = "white", high = "#b2182b",
+      midpoint = 0, limits = c(-max_abs, max_abs),
+      name = "Δ Fraction\n(vs Vehicle)"
+    ) +
+    scale_x_discrete(labels = function(x) parse(text = treatment_math_labels(x)),
+                     expand = c(0, 0)) +
+    scale_y_discrete(expand = c(0, 0)) +
+    theme_classic(base_size = 12) +
+    theme(axis.text.x = element_text(size = 11, face = "bold"),
+          axis.text.y = element_text(size = 11),
+          axis.title  = element_blank(),
+          axis.line   = element_blank(),
+          axis.ticks  = element_blank(),
+          panel.grid  = element_blank(),
+          plot.title  = element_text(face = "bold", size = 12)) +
+    labs(title = sprintf("State enrichment, %s hr", t_label),
+         subtitle = "Paired t-test (n=3); BH-FDR within each time point")
+}
+
+p_G_4h  <- make_enrichment_heatmap(enrichment_df %>% filter(Time_hr == 4),  "4")
+p_G_24h <- make_enrichment_heatmap(enrichment_df %>% filter(Time_hr == 24), "24")
+
+p_G_combined <- p_G_4h / p_G_24h
+p_G_combined
+```
+
+```{r load-texture}
+cat("Loading texture features...\n")
+sample_header <- read_csv("data/Exp1_SegmentedCells.csv",
+                          n_max = 0, show_col_types = FALSE)
+tex_all_cols <- grep("^Texture_", names(sample_header), value = TRUE)
+cat(sprintf("Found %d texture columns\n", length(tex_all_cols)))
+
+if (length(tex_all_cols) > 0) {
+  load_tex_all <- function(exp_label) {
+    read_csv(file.path("data", paste0(exp_label, "_SegmentedCells.csv")),
+             col_select = c("ImageNumber", "ObjectNumber", all_of(tex_all_cols)),
+             show_col_types = FALSE, guess_max = 2e5) %>%
+      mutate(ImageNumber = paste0(exp_label, "_", ImageNumber))
+  }
+  tex_raw <- bind_rows(load_tex_all("Exp1"),
+                       load_tex_all("Exp2"),
+                       load_tex_all("Exp3"))
+  
+  haralick_base <- unique(gsub("_rawimages_10_0[0-3]_256$", "", tex_all_cols))
+  tex_averaged  <- tex_raw %>% dplyr::select(ImageNumber, ObjectNumber)
+  for (feat in haralick_base) {
+    cols_4dir <- grep(paste0("^", feat, "_rawimages_10_0[0-3]_256$"),
+                      names(tex_raw), value = TRUE)
+    col_name <- gsub("^Texture_", "Tex_", feat)
+    tex_averaged[[col_name]] <- rowMeans(tex_raw[, cols_4dir], na.rm = TRUE)
+  }
+  
+  tex_mean_cols <- grep("^Tex_", names(tex_averaged), value = TRUE)
+  cat(sprintf("Direction-averaged features: %d\n", length(tex_mean_cols)))
+  
+  tex_mat       <- tex_averaged[, tex_mean_cols] %>% as.matrix()
+  complete_rows <- complete.cases(tex_mat)
+  tex_pca <- prcomp(scale(tex_mat[complete_rows, ]),
+                    center = FALSE, scale. = FALSE)
+  cat("Texture PCA variance:\n")
+  print(round(summary(tex_pca)$importance[, 1:min(5, ncol(tex_pca$x))], 3))
+  
+  tex_averaged$TextureComplexity <- NA_real_
+  tex_averaged$TextureComplexity[complete_rows] <- tex_pca$x[, 1]
+  
+  if ("Tex_SumEntropy" %in% names(tex_averaged) &&
+      cor(tex_averaged$TextureComplexity,
+          tex_averaged$Tex_SumEntropy, use = "complete.obs") < 0) {
+    tex_averaged$TextureComplexity <- -tex_averaged$TextureComplexity
+    cat("PC1 flipped so high entropy = high complexity\n")
+  }
+  
+  # Join to every time point's plot_df
+  plot_df_list <- lapply(plot_df_list, function(pdf) {
+    pdf %>% left_join(
+      tex_averaged %>% dplyr::select(ImageNumber, ObjectNumber, TextureComplexity),
+      by = c("ImageNumber", "ObjectNumber")
+    )
+  })
+  
+  for (nm in names(plot_df_list)) {
+    pdf <- plot_df_list[[nm]]
+    cat(sprintf("[%s] Texture joined. NA: %d / %d\n",
+                nm, sum(is.na(pdf$TextureComplexity)), nrow(pdf)))
+  }
+} else {
+  warning("No texture features found; texture panels skipped")
+  plot_df_list <- lapply(plot_df_list, function(pdf) {
+    pdf$TextureComplexity <- NA_real_
+    pdf
+  })
+}
+```
+
+```{r texture-panel-helpers}
+# Compute common y-limits across both time points for consistency
+all_tex <- bind_rows(lapply(plot_df_list, function(pdf) pdf["TextureComplexity"]))
+tex_ylim_f5 <- c(
+  quantile(all_tex$TextureComplexity, 0.01, na.rm = TRUE) * 1.1,
+  quantile(all_tex$TextureComplexity, 0.99, na.rm = TRUE) * 3
+)
+
+make_umap_texture <- function(pdf, t_label, xr, yr) {
+  q_low  <- quantile(pdf$TextureComplexity, 0.01, na.rm = TRUE)
+  q_high <- quantile(pdf$TextureComplexity, 0.99, na.rm = TRUE)
+
+  pdf %>% filter(!is.na(TextureComplexity)) %>%
+    ggplot(aes(UMAP1, UMAP2, color = TextureComplexity)) +
+    geom_point(size = 0.35, alpha = 0.5) +
+    scale_color_viridis_c(name = "Texture\ncomplexity",
+                          limits = c(q_low, q_high), oob = scales::squish) +
+    coord_fixed(xlim = xr, ylim = yr, expand = FALSE) +
+    theme_classic(base_size = 12) +
+    labs(title = sprintf("%s hr: texture complexity", t_label),
+         x = "UMAP 1", y = "UMAP 2") +
+    theme(plot.title = element_text(face = "bold", size = 12))
+}
+
+make_texture_by_state <- function(pdf, t_label) {
+  pdf %>% filter(!is.na(TextureComplexity)) %>%
+    ggplot(aes(State_final, TextureComplexity, fill = State_final)) +
+    geom_boxplot(outlier.size = 0.3, alpha = 0.85) +
+    scale_fill_manual(values = STATE_COLORS, guide = "none") +
+    coord_cartesian(ylim = tex_ylim_f5) +
+    theme_classic(base_size = 12) +
+    labs(title = sprintf("%s hr: texture by state", t_label),
+         x = NULL, y = "Texture complexity") +
+    theme(plot.title  = element_text(face = "bold", size = 12),
+          axis.text.x = element_text(angle = 20, hjust = 1))
+}
+
+# Texture by treatment + per-cytokine paired t-test (from image-level medians)
+make_texture_by_treatment <- function(pdf, t_label) {
+  tex_per_image <- pdf %>% filter(!is.na(TextureComplexity)) %>%
+    group_by(ImageNumber, Experiment, Stimulus) %>%
+    summarise(tex_median = median(TextureComplexity, na.rm = TRUE),
+              n_cells = n(), .groups = "drop") %>%
+    filter(n_cells >= 20)
+  
+  tex_per_exp <- tex_per_image %>%
+    group_by(Experiment, Stimulus) %>%
+    summarise(tex_mean = mean(tex_median), .groups = "drop")
+  
+  stats <- lapply(setdiff(TREATMENTS_6, "Vehicle"), function(stim) {
+    veh <- tex_per_exp %>% filter(Stimulus == "Vehicle") %>%
+      arrange(Experiment) %>% pull(tex_mean)
+    trt <- tex_per_exp %>% filter(Stimulus == stim) %>%
+      arrange(Experiment) %>% pull(tex_mean)
+    if (length(veh) < 3 || length(trt) < 3) {
+      return(tibble(Stimulus = stim, p_value = NA_real_))
+    }
+    tt <- t.test(trt, veh, paired = TRUE)
+    tibble(Stimulus = stim, p_value = tt$p.value)
+  }) %>% bind_rows() %>%
+    mutate(FDR = p.adjust(p_value, method = "BH"),
+           sig  = case_when(is.na(FDR)  ~ "",
+                            FDR < 0.001 ~ "***",
+                            FDR < 0.01  ~ "**",
+                            FDR < 0.05  ~ "*",
+                            TRUE        ~ "ns"),
+           x_pos = match(Stimulus, TREATMENTS_6))
+  
+  write.csv(stats,
+    paste0(FIG_PREFIX, "_I_texture_treatment_stats_", t_label, "h.csv"),
+    row.names = FALSE)
+  
+  label_y <- tex_ylim_f5[2] * 0.92
+  
+  pdf %>% filter(!is.na(TextureComplexity)) %>%
+    ggplot(aes(Stimulus, TextureComplexity, fill = Stimulus)) +
+    geom_boxplot(outlier.size = 0.3, alpha = 0.85) +
+    annotate("text", x = stats$x_pos, y = label_y,
+             label = stats$sig, size = 5, fontface = "bold") +
+    scale_fill_manual(values = PAL_6, guide = "none") +
+    scale_x_discrete(labels = function(x) parse(text = treatment_math_labels(x))) +
+    coord_cartesian(ylim = tex_ylim_f5) +
+    theme_classic(base_size = 12) +
+    labs(title = sprintf("%s hr: texture by treatment", t_label),
+         subtitle = "Paired t-test vs Vehicle on experiment means; BH-FDR",
+         x = NULL, y = "Texture complexity") +
+    theme(plot.title    = element_text(face = "bold", size = 12),
+          plot.subtitle = element_text(size = 9, color = "grey40"))
+}
+```
+
+```{r generate-texture-panels}
+texture_panels <- lapply(names(plot_df_list), function(nm) {
+  pdf  <- plot_df_list[[nm]]
+  lims <- umap_limits[[nm]]
+  t_label <- gsub("t", "", nm)
+  list(
+    H  = make_umap_texture    (pdf, t_label, lims$xr, lims$yr),  
+    H2 = make_texture_by_state(pdf, t_label),
+    I  = make_texture_by_treatment(pdf, t_label)
+  )
+})
+names(texture_panels) <- names(plot_df_list)
+```
+
+```{r save-panels}
+save_both <- function(plot, suffix, w, h) {
+  ggsave(paste0(FIG_PREFIX, "_", suffix, ".png"),
+         plot & transparent_theme,
+         width = w, height = h, dpi = 600, bg = "transparent")
+  ggsave(paste0(FIG_PREFIX, "_", suffix, ".pdf"),
+         plot & transparent_theme,
+         width = w, height = h, bg = "transparent")
+}
+
+get_umap_wh <- function(lims, h_base = 5) {
+  ar <- diff(lims$xr) / diff(lims$yr)   
+  list(w = h_base * ar, h = h_base)
+}
+
+
+for (nm in names(panels)) {
+  t_label <- gsub("t", "", nm)
+  wh <- get_umap_wh(umap_limits[[nm]], h_base = 5)
+  pp <- panels[[nm]]
+  tp <- texture_panels[[nm]]
+
+ 
+  save_both(pp$A, sprintf("A_umap_state_%sh",     t_label), wh$w + 1.2, wh$h)
+  save_both(pp$B, sprintf("B_umap_treatment_%sh", t_label), wh$w + 1.7, wh$h)
+  save_both(tp$H, sprintf("H_umap_texture_%sh",   t_label), wh$w + 1.2, wh$h)
+
+  # facet 3x2
+  save_both(pp$C, sprintf("C_umap_density_facet_%sh", t_label),
+            wh$w * 3 + 1.5, wh$h * 2 + 0.6)
+
+  save_both(pp$D, sprintf("D_state_within_treatment_%sh", t_label), 5.5, 3)
+  save_both(pp$E, sprintf("E_treatment_within_state_%sh", t_label), 5.5, 3)
+  save_both(tp$H2, sprintf("H2_texture_by_state_%sh",     t_label), 5.5, 5)
+  save_both(tp$I,  sprintf("I_texture_by_treatment_%sh",  t_label), 5.5, 3)
+}
+
+# Enrichment heatmaps
+save_both(p_G_4h,       "G_enrichment_heatmap_4h",       7, 5)
+save_both(p_G_24h,      "G_enrichment_heatmap_24h",      7, 5)
+save_both(p_G_combined, "G_enrichment_heatmap_combined", 7, 10)
+
+cat("\nSaved Figure 5 panels (A, B, C, D, E, G, H, H2, I) at 4h and 24h\n")
+```
+
+
+
+
+
+
+
